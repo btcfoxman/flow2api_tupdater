@@ -504,14 +504,11 @@ function renderApp() {
     const browser = dashboard.browser || {};
     const profiles = dashboard.profiles || [];
     const filters = dashboard.filters || {hours: state.selectedHours, hour_options: [...DASHBOARD_HOUR_OPTIONS]};
-    const activityChart = charts.sync_activity || buildSyntheticActivity(profiles, filters.hours || state.selectedHours);
-    const failureReasons = charts.failure_reasons || [];
     const targetDistribution = charts.target_distribution || [];
     const streamMeta = getStreamStatusMeta();
 
     const vncRunning = Boolean(browser.vnc_stack_running);
     const vncEnabled = Boolean(config.enable_vnc);
-    const hourOptions = getHourOptions(filters.hour_options);
     const selectedHours = normalizeDashboardHours(filters.hours || state.selectedHours);
 
     elements.appRoot.innerHTML = `
@@ -519,10 +516,7 @@ function renderApp() {
             <div>
                 <span class="eyebrow">Dashboard · v${escapeHtml(dashboard.version || "-")}</span>
                 <h1 class="hero-title">Flow2API Token Updater</h1>
-                <p class="hero-subtitle">
-                    一屏看最近 ${selectedHours} 小时的同步活动、失败原因、目标实例分布，
-                    也支持给每个 Profile 单独设置 Flow2API 地址和连接 Token。
-                </p>
+                <p class="hero-subtitle">Profile administration, sync status and target configuration.</p>
             </div>
             <div class="toolbar">
                 <span id="stream-status-pill" class="tag ${streamMeta.tone}">${escapeHtml(streamMeta.label)}</span>
@@ -546,47 +540,6 @@ function renderApp() {
             ${renderMetricCard("窗口成功", summary.window_success || 0, `最近 ${selectedHours}h`, "success")}
             ${renderMetricCard("窗口失败", summary.window_error || 0, `最近 ${selectedHours}h`, "danger")}
             ${renderMetricCard("目标实例", targetDistribution.length || summary.target_count || summary.target_instances || 0, `代理启用 ${summary.proxy_enabled || 0} 个`, "primary")}
-        </section>
-
-        <section class="grid-two">
-            <article class="chart-card">
-                <div class="card-head">
-                    <div>
-                        <h2 class="card-title">同步活动趋势</h2>
-                    </div>
-                    ${renderHourFilterButtons(hourOptions, selectedHours)}
-                </div>
-                ${renderActivityChart(activityChart, selectedHours)}
-            </article>
-            <article class="chart-card">
-                <div class="card-head">
-                    <div>
-                        <h2 class="card-title">状态分布 + Profile 排行</h2>
-                    </div>
-                </div>
-                ${renderStatusAndRanking(charts.status_breakdown || {}, charts.top_profiles || [])}
-            </article>
-        </section>
-
-        <section class="grid-two">
-            <article class="chart-card">
-                <div class="card-head">
-                    <div>
-                        <h2 class="card-title">失败原因聚合</h2>
-                    </div>
-                    <span class="tag info">Top ${Math.min(failureReasons.length || 0, 6)}</span>
-                </div>
-                ${renderFailureReasons(failureReasons)}
-            </article>
-            <article class="chart-card">
-                <div class="card-head">
-                    <div>
-                        <h2 class="card-title">目标实例分布</h2>
-                    </div>
-                    <span class="tag primary">${escapeHtml(String(targetDistribution.length || 0))} 个实例</span>
-                </div>
-                ${renderTargetDistribution(targetDistribution)}
-            </article>
         </section>
 
         <section class="section-card">
