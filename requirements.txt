@@ -1,4 +1,4 @@
-# Token Updater v3.0 依赖
+# Token Updater v3.0 dependencies
 playwright>=1.48.0,<2.0.0
 fastapi==0.104.1
 uvicorn==0.24.0
