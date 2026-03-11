@@ -48,7 +48,9 @@ jobs:
           from pathlib import Path
 
           data = Path('token_updater/api.py').read_text(encoding='utf-8')
-          m = re.search(r'version\s*=\s*["\']([^"\']+)["\']', data)
+          m = re.search(r'APP_VERSION\s*=\s*["\']([^"\']+)["\']', data)
+          if not m:
+              m = re.search(r'FastAPI\([^)]*version\s*=\s*["\']([^"\']+)["\']', data, re.S)
           if not m:
               raise SystemExit('version not found in token_updater/api.py')
           version = m.group(1)
