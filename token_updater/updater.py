@@ -119,7 +119,13 @@ class TokenSyncer:
                 )
 
                 if response.status_code != 200:
-                    return {"success": False, "error": f"HTTP {response.status_code}"}
+                    detail = (response.text or "").strip()
+                    if len(detail) > 300:
+                        detail = detail[:300] + "..."
+                    return {
+                        "success": False,
+                        "error": f"HTTP {response.status_code}: {detail}",
+                    }
 
                 data = response.json()
                 tokens = data.get("tokens", [])
@@ -386,7 +392,13 @@ class TokenSyncer:
                 )
 
                 if response.status_code != 200:
-                    return {"success": False, "error": f"HTTP {response.status_code}"}
+                    detail = (response.text or "").strip()
+                    if len(detail) > 300:
+                        detail = detail[:300] + "..."
+                    return {
+                        "success": False,
+                        "error": f"HTTP {response.status_code}: {detail}",
+                    }
 
                 data = response.json()
                 message = data.get("message", "")

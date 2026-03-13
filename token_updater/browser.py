@@ -229,21 +229,51 @@ class BrowserManager:
         return out
 
     async def _get_session_cookie(self, context: BrowserContext) -> Optional[str]:
+        """
+        Read the Flow session cookie from all domains.
+        Note: labs.google is a .google TLD domain, while Google auth cookies usually live on .google.com.
+        """
         try:
-            cookies = await context.cookies("https://labs.google")
-        except Exception:
             cookies = await context.cookies()
+        except Exception:
+            return None
+
+        # Prefer labs.google domain cookie when available.
+        for cookie in cookies:
+            if (
+                cookie.get("name") == config.session_cookie_name
+                and "labs.google" in str(cookie.get("domain") or "")
+            ):
+                value = cookie.get("value")
+                if value:
+                    return value
 
         for cookie in cookies:
             if cookie.get("name") == config.session_cookie_name:
-                return cookie.get("value")
+                value = cookie.get("value")
+                if value:
+                    return value
         return None
 
-    async def _get_cookie_value(self, context: BrowserContext, cookie_name: str) -> Optional[str]:
+    async def _get_cookie_value(
+        self,
+        context: BrowserContext,
+        cookie_name: str,
+        domain_hint: str | None = None,
+    ) -> Optional[str]:
         try:
-            cookies = await context.cookies("https://labs.google")
-        except Exception:
             cookies = await context.cookies()
+        except Exception:
+            return None
+
+        if domain_hint:
+            for cookie in cookies:
+                if cookie.get("name") != cookie_name:
+                    continue
+                if domain_hint in str(cookie.get("domain") or ""):
+                    value = cookie.get("value")
+                    if value:
+                        return value
 
         for cookie in cookies:
             if cookie.get("name") == cookie_name:
@@ -253,8 +283,12 @@ class BrowserManager:
         return None
 
     async def _get_gemini_cookie_pair(self, context: BrowserContext) -> Optional[Dict[str, str]]:
-        secure_1psid = await self._get_cookie_value(context, "__Secure-1PSID")
-        secure_1psidts = await self._get_cookie_value(context, "__Secure-1PSIDTS")
+        secure_1psid = await self._get_cookie_value(
+            context, "__Secure-1PSID", domain_hint="google.com"
+        )
+        secure_1psidts = await self._get_cookie_value(
+            context, "__Secure-1PSIDTS", domain_hint="google.com"
+        )
         if not secure_1psid or not secure_1psidts:
             return None
         return {
