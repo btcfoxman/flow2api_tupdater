@@ -1,5 +1,6 @@
 ﻿"""浏览器管理 v3.1 - 持久化上下文 + VNC登录 + Headless刷新"""
 import asyncio
+import base64
 import json
 import os
 import shutil
@@ -237,6 +238,46 @@ class BrowserManager:
             if cookie.get("name") == config.session_cookie_name:
                 return cookie.get("value")
         return None
+
+    async def _get_cookie_value(self, context: BrowserContext, cookie_name: str) -> Optional[str]:
+        try:
+            cookies = await context.cookies("https://labs.google")
+        except Exception:
+            cookies = await context.cookies()
+
+        for cookie in cookies:
+            if cookie.get("name") == cookie_name:
+                value = cookie.get("value")
+                if value:
+                    return value
+        return None
+
+    async def _get_gemini_cookie_pair(self, context: BrowserContext) -> Optional[Dict[str, str]]:
+        secure_1psid = await self._get_cookie_value(context, "__Secure-1PSID")
+        secure_1psidts = await self._get_cookie_value(context, "__Secure-1PSIDTS")
+        if not secure_1psid or not secure_1psidts:
+            return None
+        return {
+            "secure_1psid": secure_1psid,
+            "secure_1psidts": secure_1psidts,
+        }
+
+    def _build_gemini_session_token(self, profile: Dict[str, Any], payload: Dict[str, str]) -> str:
+        prefix = config.gemini_client_id_prefix or "tupdater"
+        profile_id = profile.get("id")
+        client_id = f"{prefix}-{profile_id}" if profile_id is not None else prefix
+        body = {
+            "version": 1,
+            "type": "gemini_cookie_pair",
+            "client_id": client_id,
+            "email": client_id,
+            "secure_1psid": payload["secure_1psid"],
+            "secure_1psidts": payload["secure_1psidts"],
+            "proxy": profile.get("proxy_url") if profile.get("proxy_enabled") else None,
+        }
+        raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        encoded = base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
+        return f"gcu:v1:{encoded}"
 
     async def import_cookies(self, profile_id: int, cookies_json: str) -> Dict[str, Any]:
         """导入 Cookie（JSON），写入到持久化 profile 中"""
@@ -482,27 +523,50 @@ class BrowserManager:
             except Exception as e:
                 logger.warning(f"[{profile['name']}] 等待跳转超时: {e}")
 
-            # 等待 cookie 更新：优先轮询 session cookie，减少资源占用
-            token = await self._get_session_cookie(context)
-            deadline = asyncio.get_running_loop().time() + 12.0
-            while asyncio.get_running_loop().time() < deadline:
-                token = await self._get_session_cookie(context)
-                if token:
-                    break
-                await asyncio.sleep(0.5)
+            token = None
+            token_preview = None
+            if config.token_extract_mode == "gemini_cookies":
+                pair = await self._get_gemini_cookie_pair(context)
+                deadline = asyncio.get_running_loop().time() + 12.0
+                while asyncio.get_running_loop().time() < deadline:
+                    pair = await self._get_gemini_cookie_pair(context)
+                    if pair:
+                        break
+                    await asyncio.sleep(0.5)
 
-            if not token:
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=8000)
-                except Exception:
-                    pass
+                if not pair:
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    pair = await self._get_gemini_cookie_pair(context)
+
+                if pair:
+                    token = self._build_gemini_session_token(profile, pair)
+                    token_preview = pair["secure_1psidts"]
+            else:
+                # 等待 cookie 更新：优先轮询 session cookie，减少资源占用
                 token = await self._get_session_cookie(context)
+                deadline = asyncio.get_running_loop().time() + 12.0
+                while asyncio.get_running_loop().time() < deadline:
+                    token = await self._get_session_cookie(context)
+                    if token:
+                        break
+                    await asyncio.sleep(0.5)
+
+                if not token:
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    token = await self._get_session_cookie(context)
+                token_preview = token
 
             if token:
                 await profile_db.update_profile(
                     profile["id"],
                     is_logged_in=1,
-                    last_token=self._mask_token(token),
+                    last_token=self._mask_token(token_preview or token),
                     last_token_time=datetime.now().isoformat(),
                 )
                 logger.info(f"[{profile['name']}] Token 提取成功")
@@ -548,6 +612,9 @@ class BrowserManager:
                 return None
 
             if self._active_profile_id == profile_id and self._active_context:
+                if config.token_extract_mode == "gemini_cookies":
+                    pair = await self._get_gemini_cookie_pair(self._active_context)
+                    return self._build_gemini_session_token(profile, pair) if pair else None
                 return await self._get_session_cookie(self._active_context)
 
             context = None
@@ -567,6 +634,9 @@ class BrowserManager:
                     args=BROWSER_ARGS,
                     ignore_default_args=["--enable-automation"],
                 )
+                if config.token_extract_mode == "gemini_cookies":
+                    pair = await self._get_gemini_cookie_pair(context)
+                    return self._build_gemini_session_token(profile, pair) if pair else None
                 return await self._get_session_cookie(context)
             except Exception:
                 return None

@@ -141,7 +141,10 @@ class TokenSyncer:
             await self._record_sync_result(profile, flow2api_url, False, message=error)
             return {"success": False, "error": error, "target_url": flow2api_url}
 
-        logger.info(f"[{profile['name']}] 提取到 Token: {token[:20]}...{token[-10:]}")
+        if config.token_extract_mode == "gemini_cookies":
+            logger.info(f"[{profile['name']}] 提取到 Gemini 凭据令牌")
+        else:
+            logger.info(f"[{profile['name']}] 提取到 Token: {token[:20]}...{token[-10:]}")
         result = await self._push_to_flow2api(token, flow2api_url, connection_token)
 
         if result["success"]:

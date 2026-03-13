@@ -57,6 +57,8 @@ class Config(BaseModel):
     labs_url: str = "https://labs.google/fx/tools/flow"
     login_url: str = "https://labs.google/fx/api/auth/signin/google"
     session_cookie_name: str = "__Secure-next-auth.session-token"
+    token_extract_mode: str = "session"
+    gemini_client_id_prefix: str = "tupdater"
     api_port: int
     db_path: str = "/app/data/profiles.db"
     session_ttl_minutes: int
@@ -83,6 +85,10 @@ def _build_config() -> Config:
         connection_token=connection_token,
         refresh_interval=refresh_interval,
         enable_vnc=enable_vnc,
+        token_extract_mode=(_get_env("TOKEN_EXTRACT_MODE") or "session").strip().lower(),
+        gemini_client_id_prefix=(
+            _get_env("GEMINI_CLIENT_ID_PREFIX") or "tupdater"
+        ).strip(),
         api_port=_parse_int(_get_env("API_PORT"), 8002),
         session_ttl_minutes=_parse_int(_get_env("SESSION_TTL_MINUTES"), 1440),
         config_file=config_file,
