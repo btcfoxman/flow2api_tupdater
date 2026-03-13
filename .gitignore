@@ -13,3 +13,5 @@ dist/
 build/
 *.egg-info/
 .venv
+
+token_updater/__pycache__/
