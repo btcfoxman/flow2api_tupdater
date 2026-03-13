@@ -153,6 +153,14 @@ class BrowserManager:
             return token or ""
         return f"{token[:4]}...{token[-4:]}"
 
+    @staticmethod
+    def _stable_profile_identity(profile: Dict[str, Any]) -> str:
+        profile_id = profile.get("id")
+        if profile_id is not None:
+            return f"profile-{profile_id}"
+        name = str(profile.get("name") or "").strip()
+        return name or "profile"
+
     async def _get_proxy(self, profile: Dict[str, Any]) -> Optional[Dict]:
         """获取代理配置"""
         if profile.get("proxy_enabled") and profile.get("proxy_url"):
@@ -632,12 +640,14 @@ class BrowserManager:
                 token_preview = token
 
             if token:
-                await profile_db.update_profile(
-                    profile["id"],
-                    is_logged_in=1,
-                    last_token=self._mask_token(token_preview or token),
-                    last_token_time=datetime.now().isoformat(),
-                )
+                update_data: Dict[str, Any] = {
+                    "is_logged_in": 1,
+                    "last_token": self._mask_token(token_preview or token),
+                    "last_token_time": datetime.now().isoformat(),
+                }
+                if self._resolve_extract_mode(profile) == "gemini_cookies" and not profile.get("email"):
+                    update_data["email"] = self._stable_profile_identity(profile)
+                await profile_db.update_profile(profile["id"], **update_data)
                 logger.info(f"[{profile['name']}] Token 提取成功")
             else:
                 await profile_db.update_profile(profile["id"], is_logged_in=0)
@@ -662,7 +672,14 @@ class BrowserManager:
             return {"success": False, "error": "Profile 不存在"}
 
         token = await self.peek_token(profile_id)
-        await profile_db.update_profile(profile_id, is_logged_in=1 if token else 0)
+        update_data: Dict[str, Any] = {"is_logged_in": 1 if token else 0}
+        if (
+            token
+            and self._resolve_extract_mode(profile) == "gemini_cookies"
+            and not profile.get("email")
+        ):
+            update_data["email"] = self._stable_profile_identity(profile)
+        await profile_db.update_profile(profile_id, **update_data)
         return {
             "success": True,
             "is_logged_in": token is not None,
