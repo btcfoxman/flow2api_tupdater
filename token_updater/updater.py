@@ -28,6 +28,35 @@ class TokenSyncer:
         ).strip()
         return flow2api_url, connection_token
 
+    def _resolve_extract_mode(self, profile: Dict[str, Any]) -> str:
+        remark = str(profile.get("remark") or "").strip().lower()
+        if remark:
+            if any(
+                token in remark
+                for token in (
+                    "extract=gemini_cookies",
+                    "mode=gemini_cookies",
+                    "gemini-fastapi",
+                    "gemini_fastapi",
+                    "[gemini]",
+                )
+            ):
+                return "gemini_cookies"
+            if any(
+                token in remark
+                for token in (
+                    "extract=session",
+                    "mode=session",
+                    "flow2api",
+                    "[flow2api]",
+                )
+            ):
+                return "session"
+        fallback = str(config.token_extract_mode or "").strip().lower()
+        if fallback in {"session", "gemini_cookies"}:
+            return fallback
+        return "session"
+
     async def _record_sync_result(
         self,
         profile: Dict[str, Any],
@@ -141,7 +170,7 @@ class TokenSyncer:
             await self._record_sync_result(profile, flow2api_url, False, message=error)
             return {"success": False, "error": error, "target_url": flow2api_url}
 
-        if config.token_extract_mode == "gemini_cookies":
+        if self._resolve_extract_mode(profile) == "gemini_cookies":
             logger.info(f"[{profile['name']}] 提取到 Gemini 凭据令牌")
         else:
             logger.info(f"[{profile['name']}] 提取到 Token: {token[:20]}...{token[-10:]}")

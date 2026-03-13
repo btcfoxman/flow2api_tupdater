@@ -262,10 +262,45 @@ class BrowserManager:
             "secure_1psidts": secure_1psidts,
         }
 
-    def _build_gemini_session_token(self, profile: Dict[str, Any], payload: Dict[str, str]) -> str:
-        prefix = config.gemini_client_id_prefix or "tupdater"
+    def _resolve_extract_mode(self, profile: Dict[str, Any]) -> str:
+        remark = str(profile.get("remark") or "").strip().lower()
+        if remark:
+            if any(
+                token in remark
+                for token in (
+                    "extract=gemini_cookies",
+                    "mode=gemini_cookies",
+                    "gemini-fastapi",
+                    "gemini_fastapi",
+                    "[gemini]",
+                )
+            ):
+                return "gemini_cookies"
+            if any(
+                token in remark
+                for token in (
+                    "extract=session",
+                    "mode=session",
+                    "flow2api",
+                    "[flow2api]",
+                )
+            ):
+                return "session"
+        fallback = str(config.token_extract_mode or "").strip().lower()
+        if fallback in {"session", "gemini_cookies"}:
+            return fallback
+        return "session"
+
+    def _resolve_gemini_client_id(self, profile: Dict[str, Any]) -> str:
         profile_id = profile.get("id")
-        client_id = f"{prefix}-{profile_id}" if profile_id is not None else prefix
+        if profile_id is not None:
+            return f"profile-{profile_id}"
+        base = str(profile.get("email") or profile.get("name") or "profile").strip().lower()
+        base = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in base).strip("-")
+        return base or "profile"
+
+    def _build_gemini_session_token(self, profile: Dict[str, Any], payload: Dict[str, str]) -> str:
+        client_id = self._resolve_gemini_client_id(profile)
         body = {
             "version": 1,
             "type": "gemini_cookie_pair",
@@ -525,7 +560,7 @@ class BrowserManager:
 
             token = None
             token_preview = None
-            if config.token_extract_mode == "gemini_cookies":
+            if self._resolve_extract_mode(profile) == "gemini_cookies":
                 pair = await self._get_gemini_cookie_pair(context)
                 deadline = asyncio.get_running_loop().time() + 12.0
                 while asyncio.get_running_loop().time() < deadline:
@@ -612,7 +647,7 @@ class BrowserManager:
                 return None
 
             if self._active_profile_id == profile_id and self._active_context:
-                if config.token_extract_mode == "gemini_cookies":
+                if self._resolve_extract_mode(profile) == "gemini_cookies":
                     pair = await self._get_gemini_cookie_pair(self._active_context)
                     return self._build_gemini_session_token(profile, pair) if pair else None
                 return await self._get_session_cookie(self._active_context)
@@ -634,7 +669,7 @@ class BrowserManager:
                     args=BROWSER_ARGS,
                     ignore_default_args=["--enable-automation"],
                 )
-                if config.token_extract_mode == "gemini_cookies":
+                if self._resolve_extract_mode(profile) == "gemini_cookies":
                     pair = await self._get_gemini_cookie_pair(context)
                     return self._build_gemini_session_token(profile, pair) if pair else None
                 return await self._get_session_cookie(context)
