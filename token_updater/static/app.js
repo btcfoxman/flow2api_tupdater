@@ -8,6 +8,7 @@ const state = {
     modal: null,
     loading: false,
     pendingRefresh: false,
+    operationLock: null,
     selectedHours: normalizeDashboardHours(Number(localStorage.getItem("dashboard-hours") || 24)),
     stream: null,
     streamStatus: "idle",
@@ -87,6 +88,59 @@ function updateStreamBadge() {
     if (copy) {
         copy.textContent = meta.copy;
     }
+}
+
+function getExecutionState() {
+    if (state.operationLock?.busy) {
+        return state.operationLock;
+    }
+    const execution = state.dashboard?.execution;
+    if (execution?.busy) {
+        return execution.current ? {busy: true, ...execution.current} : execution;
+    }
+    return {busy: false};
+}
+
+function getExecutionMessage(execution = getExecutionState()) {
+    if (!execution?.busy) {
+        return "浏览器相关操作会自动串行执行，执行期间相关按钮会暂时锁定。";
+    }
+    const label = execution.label || "任务";
+    const profileName = String(execution.profile_name || "").trim();
+    return profileName ? `正在执行${label}：${profileName}，其余浏览器相关操作已暂时锁定。` : `正在执行${label}，其余浏览器相关操作已暂时锁定。`;
+}
+
+function getBrowserLockAttrs() {
+    const execution = getExecutionState();
+    const attrs = ['data-browser-lock="true"'];
+    if (execution.busy) {
+        attrs.push("disabled");
+        attrs.push(`title="${escapeAttr(getExecutionMessage(execution))}"`);
+    }
+    return attrs.join(" ");
+}
+
+function syncExecutionButtons() {
+    const execution = getExecutionState();
+    const message = getExecutionMessage(execution);
+    document.querySelectorAll("[data-browser-lock='true']").forEach((button) => {
+        const pending = button.dataset.pending === "true";
+        button.disabled = execution.busy || pending;
+        if (execution.busy) {
+            button.title = message;
+        } else {
+            button.removeAttribute("title");
+        }
+    });
+    const notice = document.getElementById("execution-lock-copy");
+    if (notice) {
+        notice.textContent = message;
+    }
+}
+
+function setOperationLock(lockState = null) {
+    state.operationLock = lockState ? {busy: true, ...lockState} : null;
+    syncExecutionButtons();
 }
 
 function isInteractionLocked() {
@@ -313,6 +367,7 @@ async function refreshDashboard(silent = false, force = false) {
         localStorage.setItem("dashboard-hours", String(selectedHours));
         state.pendingRefresh = false;
         renderApp();
+        syncExecutionButtons();
         updateStreamBadge();
         return state.dashboard;
     } catch (error) {
@@ -572,9 +627,10 @@ function renderApp() {
 
         <div class="notice">
             ${vncEnabled
-                ? `登录方式：创建账号 → 点击「登录」→ 在远程登录窗口完成谷歌登录 → 点击「关闭浏览器」保存状态。当前 ${vncRunning ? "远程登录已可用" : "远程登录暂未启动，会在点击登录后按需拉起"}。`
-                : "当前已禁用远程登录。如需重新授权，请将环境变量 ENABLE_VNC 设为 1 后重启容器。"}
+                ? `登录方式：创建账号或导入账号密码 → 已配置凭据可点「自动登录」→ 需要人工接管时点「登录」并在远程窗口完成谷歌登录 → 点击「关闭浏览器」保存状态。当前 ${vncRunning ? "远程登录已可用" : "远程登录暂未启动，会在点击登录后按需拉起"}。`
+                : "当前已禁用远程登录。已配置凭据的账号仍可尝试后台自动登录；如需人工接管，请将环境变量 ENABLE_VNC 设为 1 后重启容器。"}
             <div id="stream-status-copy" class="notice-inline">${escapeHtml(streamMeta.copy)}</div>
+            <div id="execution-lock-copy" class="notice-inline">${escapeHtml(getExecutionMessage())}</div>
         </div>
 
         <section class="stats-grid">
@@ -616,14 +672,15 @@ function renderApp() {
                     <h2 class="card-title">账号列表</h2>
                 </div>
                 <div class="button-row">
-                    <button class="btn success" onclick="syncAll(this)">同步全部</button>
+                    <button class="btn success" ${getBrowserLockAttrs()} onclick="syncAll(this)">同步全部</button>
+                    <button class="btn ghost" onclick="openCredentialImportModal()">导入账号</button>
                     <button class="btn primary" onclick="openProfileModal()">新建账号</button>
                 </div>
             </div>
             <div class="profiles-grid">
                 ${profiles.length ? profiles.map(renderProfileCard).join("") : `
                     <div class="empty-state">
-                        还没有账号。先创建一个账号，再通过远程登录或导入会话数据完成登录。
+                        还没有账号。先创建账号，或点击上方「导入账号」批量导入账号密码，再通过自动登录、远程登录或导入会话数据完成登录。
                     </div>`}
             </div>
         </section>
@@ -831,6 +888,11 @@ function renderProfileCard(profile) {
     const resultTone = getStatusTone(resultStatus);
     const targetLabel = profile.uses_default_target ? "默认目标" : "独立目标";
     const lastProcessedAt = profile.last_check_time || profile.last_sync_time;
+    const profileIdentity = String(
+        profile.email
+        || profile.login_account
+        || (profile.is_logged_in ? "已登录 / 待识别邮箱" : "未登录 / 未识别邮箱"),
+    ).trim();
 
     return `
         <article class="profile-card">
@@ -838,7 +900,7 @@ function renderProfileCard(profile) {
                 <div>
                     <h3 class="profile-name">${escapeHtml(profile.name || "未命名")}</h3>
                     <div class="profile-meta">
-                        ${escapeHtml(profile.email || "未登录 / 未识别邮箱")}
+                        ${escapeHtml(profileIdentity)}
                         ${profile.remark ? ` · ${escapeHtml(profile.remark)}` : ""}
                     </div>
                 </div>
@@ -851,6 +913,7 @@ function renderProfileCard(profile) {
                 <span class="badge ${profile.is_logged_in ? "success" : "warning"}">${profile.is_logged_in ? "已登录" : "未登录"}</span>
                 <span class="badge ${resultTone}">${escapeHtml(lastResult || "暂无处理结果")}</span>
                 <span class="badge info">${escapeHtml(targetLabel)}</span>
+                ${profile.has_login_credentials ? `<span class="badge primary">已配置凭据</span>` : ""}
                 ${profile.has_connection_token_override ? `<span class="badge primary">已覆盖令牌</span>` : ""}
                 ${profile.proxy_url ? `<span class="badge primary">代理已配置</span>` : ""}
             </div>
@@ -875,19 +938,22 @@ function renderProfileCard(profile) {
             </div>
 
             <div class="profile-footer">
-                <div class="button-row">
+                <div class="button-row wrap-row">
+                    ${!profile.is_browser_active && profile.has_login_credentials
+                        ? `<button class="btn primary small" ${getBrowserLockAttrs()} onclick="autoLogin(${profile.id}, this)">自动登录</button>`
+                        : ""}
                     ${state.dashboard.config.enable_vnc
                         ? (profile.is_browser_active
-                            ? `<button class="btn warning small" onclick="closeBrowser(${profile.id}, this)">关闭浏览器</button>`
-                            : `<button class="btn primary small" onclick="launchBrowser(${profile.id}, this)">登录</button>`)
+                            ? `<button class="btn warning small" ${getBrowserLockAttrs()} onclick="closeBrowser(${profile.id}, this)">关闭浏览器</button>`
+                            : `<button class="btn primary small" ${getBrowserLockAttrs()} onclick="launchBrowser(${profile.id}, this)">登录</button>`)
                         : ""}
-                    <button class="btn ghost small" onclick="checkLogin(${profile.id}, this)">检测</button>
-                    <button class="btn success small" onclick="syncProfile(${profile.id}, this)">同步</button>
+                    <button class="btn ghost small" ${getBrowserLockAttrs()} onclick="checkLogin(${profile.id}, this)">检测</button>
+                    <button class="btn success small" ${getBrowserLockAttrs()} onclick="syncProfile(${profile.id}, this)">同步</button>
                     <button class="btn ghost small" onclick="openCookieModal(${profile.id})">会话数据</button>
                 </div>
                 <div class="button-row">
                     <button class="btn ghost small" onclick="openProfileModal(${profile.id})">编辑</button>
-                    <button class="btn danger small" onclick="deleteProfile(${profile.id}, '${escapeJs(profile.name || '')}', this)">删除</button>
+                    <button class="btn danger small" ${getBrowserLockAttrs()} onclick="deleteProfile(${profile.id}, '${escapeJs(profile.name || '')}', this)">删除</button>
                 </div>
             </div>
         </article>
@@ -1028,6 +1094,7 @@ async function loadProfileModal(profileId) {
 function renderProfileModal(profile, editing) {
     state.modal = {type: "profile", profileId: profile.id || null, editing};
     const hasOverride = Boolean(profile.connection_token_override || profile.connection_token_override_preview);
+    const hasLoginCredentials = Boolean(profile.has_login_credentials || profile.has_login_password);
     showModal(`
         <div class="modal-card">
             <div class="modal-head">
@@ -1045,6 +1112,15 @@ function renderProfileModal(profile, editing) {
                 <div class="field">
                     <label for="profile-remark">备注</label>
                     <input id="profile-remark" value="${escapeAttr(profile.remark || "")}" placeholder="写点备注，后面找起来更快">
+                </div>
+                <div class="field">
+                    <label for="profile-login-account">登录账号</label>
+                    <input id="profile-login-account" value="${escapeAttr(profile.login_account || "")}" placeholder="邮箱、手机号或 Workspace 账号">
+                </div>
+                <div class="field">
+                    <label for="profile-login-password">登录密码</label>
+                    <input id="profile-login-password" type="password" placeholder="${escapeAttr(hasLoginCredentials ? "已保存，留空则不修改" : "留空则不配置自动登录")}">
+                    <span class="field-hint">保存后会用于账号卡片里的自动登录。</span>
                 </div>
                 <div class="field">
                     <label>启用状态</label>
@@ -1076,6 +1152,13 @@ function renderProfileModal(profile, editing) {
                         <span>清空当前连接令牌覆盖，改回使用全局默认值</span>
                     </label>
                 </div>` : ""}
+            ${editing && hasLoginCredentials ? `
+                <div class="field" style="margin-top:16px;">
+                    <label class="switch">
+                        <input id="profile-clear-login-credentials" type="checkbox">
+                        <span>清空当前登录账号和登录密码，关闭自动登录</span>
+                    </label>
+                </div>` : ""}
             <div class="modal-actions">
                 <button class="btn ghost" onclick="closeModal()">取消</button>
                 <button class="btn primary" onclick="saveProfile(this)">${editing ? "保存变更" : "创建账号"}</button>
@@ -1088,6 +1171,9 @@ async function saveProfile(button) {
     const modal = state.modal || {};
     const name = (document.getElementById("profile-name")?.value || "").trim();
     const remark = (document.getElementById("profile-remark")?.value || "").trim();
+    const loginAccount = (document.getElementById("profile-login-account")?.value || "").trim();
+    const loginPassword = document.getElementById("profile-login-password")?.value || "";
+    const clearLoginCredentials = Boolean(document.getElementById("profile-clear-login-credentials")?.checked);
     const proxyUrl = (document.getElementById("profile-proxy")?.value || "").trim();
     const flow2apiUrl = (document.getElementById("profile-target-url")?.value || "").trim();
     const tokenOverride = document.getElementById("profile-target-token")?.value || "";
@@ -1103,9 +1189,16 @@ async function saveProfile(button) {
         name,
         remark,
         is_active: isActive,
+        login_account: loginAccount,
         proxy_url: proxyUrl,
         flow2api_url: flow2apiUrl,
     };
+    if (!modal.editing || loginPassword) {
+        payload.login_password = loginPassword;
+    }
+    if (modal.editing && clearLoginCredentials) {
+        payload.clear_login_credentials = true;
+    }
     if (!modal.editing || tokenOverride) {
         payload.connection_token_override = tokenOverride;
     }
@@ -1133,6 +1226,56 @@ async function saveProfile(button) {
     });
 }
 
+function openCredentialImportModal() {
+    state.modal = {type: "import-accounts"};
+    showModal(`
+        <div class="modal-card">
+            <div class="modal-head">
+                <div>
+                    <span class="eyebrow">导入账号密码</span>
+                    <h3 class="card-title">批量导入自动登录凭据</h3>
+                </div>
+                <button class="btn ghost small" onclick="closeModal()">关闭</button>
+            </div>
+            <div class="field">
+                <label for="accounts-import-content">账号文本</label>
+                <textarea id="accounts-import-content" placeholder="名称,账号,密码&#10;备用号,foo@gmail.com,pass123&#10;&#10;也支持两列：账号,密码"></textarea>
+                <span class="field-hint">支持“名称,账号,密码”、“账号,密码”、Tab、| 或 ---- 分隔。名称重复时默认更新该账号的登录凭据。</span>
+            </div>
+            <div class="field">
+                <label class="switch">
+                    <input id="accounts-import-update-existing" type="checkbox" checked>
+                    <span>名称重复时更新已有账号的登录凭据</span>
+                </label>
+            </div>
+            <div class="modal-actions">
+                <button class="btn ghost" onclick="closeModal()">取消</button>
+                <button class="btn primary" onclick="submitCredentialImport(this)">开始导入</button>
+            </div>
+        </div>
+    `);
+}
+
+async function submitCredentialImport(button) {
+    const content = (document.getElementById("accounts-import-content")?.value || "").trim();
+    const updateExisting = Boolean(document.getElementById("accounts-import-update-existing")?.checked);
+    if (!content) {
+        toast("请输入要导入的账号文本", "error");
+        return;
+    }
+
+    await withButton(button, "导入中...", async () => {
+        const result = await json(`${API}/api/profiles/import-accounts`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({content, update_existing: updateExisting}),
+        });
+        closeModal(true);
+        await refreshDashboard(false, true);
+        toast(`导入完成：新增 ${result.created || 0}，更新 ${result.updated || 0}，跳过 ${result.skipped || 0}`, "success");
+    });
+}
+
 function openCookieModal(profileId) {
     state.modal = {type: "cookie", profileId};
     showModal(`
@@ -1151,7 +1294,7 @@ function openCookieModal(profileId) {
             </div>
             <div class="modal-actions">
                 <button class="btn ghost" onclick="closeModal()">取消</button>
-                <button class="btn primary" onclick="submitCookies(this)">导入会话数据</button>
+                <button class="btn primary" ${getBrowserLockAttrs()} onclick="submitCookies(this)">导入会话数据</button>
             </div>
         </div>
     `);
@@ -1165,7 +1308,7 @@ async function submitCookies(button) {
         return;
     }
 
-    await withButton(button, "导入中...", async () => {
+    await withOperationLock(button, "导入中...", {action: "import_cookies", label: "导入会话数据"}, async () => {
         const data = await json(`${API}/api/profiles/${modal.profileId}/import-cookies`, {
             method: "POST",
             headers: {"Content-Type": "application/json"},
@@ -1178,7 +1321,7 @@ async function submitCookies(button) {
 }
 
 async function syncAll(button) {
-    await withButton(button, "同步中...", async () => {
+    await withOperationLock(button, "同步中...", {action: "sync_all", label: "同步全部账号"}, async () => {
         const result = await json(`${API}/api/sync-all`, {method: "POST"});
         await refreshDashboard(false, true);
         toast(`已完成：成功 ${result.success_count || 0}，失败 ${result.error_count || 0}，跳过 ${result.skipped || 0}`, "success");
@@ -1186,7 +1329,7 @@ async function syncAll(button) {
 }
 
 async function syncProfile(profileId, button) {
-    await withButton(button, "同步中...", async () => {
+    await withOperationLock(button, "同步中...", {action: "sync_profile", label: "同步账号", profile_id: profileId}, async () => {
         const result = await json(`${API}/api/profiles/${profileId}/sync`, {method: "POST"});
         await refreshDashboard(false, true);
         toast(result.success ? "同步成功" : result.error || "同步失败", result.success ? "success" : "error");
@@ -1194,15 +1337,23 @@ async function syncProfile(profileId, button) {
 }
 
 async function checkLogin(profileId, button) {
-    await withButton(button, "检测中...", async () => {
+    await withOperationLock(button, "检测中...", {action: "check_login", label: "检测登录状态", profile_id: profileId}, async () => {
         const result = await json(`${API}/api/profiles/${profileId}/check-login`, {method: "POST"});
         await refreshDashboard(false, true);
         toast(result.is_logged_in ? "已登录" : "未登录或已过期", result.is_logged_in ? "success" : "error");
     });
 }
 
+async function autoLogin(profileId, button) {
+    await withOperationLock(button, "登录中...", {action: "auto_login", label: "自动登录", profile_id: profileId}, async () => {
+        const result = await json(`${API}/api/profiles/${profileId}/auto-login`, {method: "POST"});
+        await refreshDashboard(false, true);
+        toast(result.has_token ? "自动登录成功，已获取会话令牌" : "自动登录成功", "success");
+    });
+}
+
 async function launchBrowser(profileId, button) {
-    await withButton(button, "启动中...", async () => {
+    await withOperationLock(button, "启动中...", {action: "launch_browser", label: "启动浏览器登录", profile_id: profileId}, async () => {
         await json(`${API}/api/profiles/${profileId}/launch`, {method: "POST"});
         await waitVncReady();
         await refreshDashboard(false, true);
@@ -1212,7 +1363,7 @@ async function launchBrowser(profileId, button) {
 }
 
 async function closeBrowser(profileId, button) {
-    await withButton(button, "关闭中...", async () => {
+    await withOperationLock(button, "关闭中...", {action: "close_browser", label: "关闭浏览器", profile_id: profileId}, async () => {
         const result = await json(`${API}/api/profiles/${profileId}/close`, {method: "POST"});
         await refreshDashboard(false, true);
         toast(result.is_logged_in ? "浏览器已关闭，登录状态已保存" : "浏览器已关闭", "success");
@@ -1224,7 +1375,7 @@ async function deleteProfile(profileId, profileName, button) {
         return;
     }
 
-    await withButton(button, "删除中...", async () => {
+    await withOperationLock(button, "删除中...", {action: "delete_profile", label: "删除账号", profile_id: profileId, profile_name: profileName}, async () => {
         await request(`${API}/api/profiles/${profileId}`, {method: "DELETE"});
         await refreshDashboard(false, true);
         toast("账号已删除", "success");
@@ -1281,9 +1432,19 @@ function toast(message, type = "success") {
     window.setTimeout(() => toastElement.remove(), 3200);
 }
 
+async function withOperationLock(button, pendingText, lockState, action) {
+    setOperationLock(lockState);
+    try {
+        await withButton(button, pendingText, action);
+    } finally {
+        setOperationLock(null);
+    }
+}
+
 async function withButton(button, pendingText, action) {
     const original = button ? button.innerHTML : "";
     if (button) {
+        button.dataset.pending = "true";
         button.disabled = true;
         button.innerHTML = pendingText;
     }
@@ -1295,9 +1456,11 @@ async function withButton(button, pendingText, action) {
         }
     } finally {
         if (button) {
+            delete button.dataset.pending;
             button.disabled = false;
             button.innerHTML = original;
         }
+        syncExecutionButtons();
     }
 }
 
@@ -1401,11 +1564,14 @@ window.saveConfig = saveConfig;
 window.openProfileModal = openProfileModal;
 window.saveProfile = saveProfile;
 window.closeModal = closeModal;
+window.openCredentialImportModal = openCredentialImportModal;
+window.submitCredentialImport = submitCredentialImport;
 window.openCookieModal = openCookieModal;
 window.submitCookies = submitCookies;
 window.syncAll = syncAll;
 window.syncProfile = syncProfile;
 window.checkLogin = checkLogin;
+window.autoLogin = autoLogin;
 window.launchBrowser = launchBrowser;
 window.closeBrowser = closeBrowser;
 window.deleteProfile = deleteProfile;

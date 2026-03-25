@@ -1,8 +1,8 @@
 ﻿"""浏览器管理 v3.1 - 持久化上下文 + VNC登录 + Headless刷新"""
 import asyncio
-import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime
@@ -12,6 +12,21 @@ from .config import config
 from .database import profile_db
 from .proxy_utils import parse_proxy, format_proxy_for_playwright
 from .logger import logger
+
+try:
+    import pyautogui
+    import pygetwindow as pygetwindow
+    import win32con
+    import win32gui
+
+    pyautogui.FAILSAFE = False
+    DESKTOP_AUTOMATION_AVAILABLE = True
+except Exception:
+    pyautogui = None
+    pygetwindow = None
+    win32con = None
+    win32gui = None
+    DESKTOP_AUTOMATION_AVAILABLE = False
 
 
 # 内存优化参数
@@ -37,6 +52,32 @@ BROWSER_ARGS = [
 LOGIN_BROWSER_ARGS = BROWSER_ARGS[:6] + ["--disable-blink-features=AutomationControlled"]
 
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font", "stylesheet"}
+EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+BUTTON_CANDIDATE_SELECTORS = "button, [role='button'], input[type='submit'], input[type='button'], a[role='button'], cr-button"
+ACCOUNT_INPUT_SELECTORS = [
+    "#identifierId",
+    "input[name='identifier']",
+    "input[autocomplete='username']",
+    "input[autocomplete='email']",
+    "input[type='email']",
+    "input[type='tel']",
+]
+PASSWORD_INPUT_SELECTORS = [
+    "input[name='Passwd']",
+    "input[autocomplete='current-password']",
+    "input[autocomplete='password']",
+    "input[type='password']",
+]
+ACCOUNT_SUBMIT_SELECTORS = [
+    "#identifierNext",
+    "#identifierNext button",
+    "[id='identifierNext'] button",
+]
+PASSWORD_SUBMIT_SELECTORS = [
+    "#passwordNext",
+    "#passwordNext button",
+    "[id='passwordNext'] button",
+]
 
 SUPERVISOR_CONF = "/etc/supervisor/conf.d/supervisord.conf"
 VNC_START_ORDER = ("xvfb", "fluxbox", "x11vnc", "novnc")
@@ -153,13 +194,31 @@ class BrowserManager:
             return token or ""
         return f"{token[:4]}...{token[-4:]}"
 
-    @staticmethod
-    def _stable_profile_identity(profile: Dict[str, Any]) -> str:
-        profile_id = profile.get("id")
-        if profile_id is not None:
-            return f"profile-{profile_id}"
-        name = str(profile.get("name") or "").strip()
-        return name or "profile"
+    def _normalize_email(self, value: str) -> str:
+        return str(value or "").strip().lower()
+
+    def _extract_email_from_text(self, text: str) -> Optional[str]:
+        content = str(text or "")
+        for match in EMAIL_PATTERN.findall(content):
+            normalized = self._normalize_email(match)
+            if normalized:
+                return normalized
+        return None
+
+    def _resolve_known_email(self, profile: Dict[str, Any], body_text: str = "") -> Optional[str]:
+        stored_email = self._normalize_email(str(profile.get("email") or ""))
+        if stored_email:
+            return stored_email
+
+        page_email = self._extract_email_from_text(body_text)
+        if page_email:
+            return page_email
+
+        login_account = self._normalize_email(str(profile.get("login_account") or ""))
+        if login_account and EMAIL_PATTERN.fullmatch(login_account):
+            return login_account
+
+        return None
 
     async def _get_proxy(self, profile: Dict[str, Any]) -> Optional[Dict]:
         """获取代理配置"""
@@ -170,6 +229,699 @@ class BrowserManager:
                 logger.info(f"[{profile['name']}] 使用代理: {proxy['server']}")
                 return proxy
         return None
+
+    async def _safe_page_text(self, page) -> str:
+        try:
+            body = page.locator("body").first
+            if await body.count() <= 0:
+                return ""
+            return str(await body.inner_text(timeout=2000) or "")
+        except Exception:
+            return ""
+
+    def _text_contains_any(self, text: str, patterns: List[str]) -> bool:
+        lowered = str(text or "").lower()
+        if not lowered:
+            return False
+        return any(str(pattern or "").strip().lower() in lowered for pattern in patterns if str(pattern or "").strip())
+
+    async def _get_locator_search_text(self, locator) -> str:
+        parts: List[str] = []
+
+        try:
+            parts.append(str(await locator.inner_text(timeout=1000) or ""))
+        except Exception:
+            pass
+
+        try:
+            parts.append(str(await locator.text_content(timeout=1000) or ""))
+        except Exception:
+            pass
+
+        for attr in ("value", "aria-label", "title", "name", "data-identifier", "data-email"):
+            try:
+                parts.append(str(await locator.get_attribute(attr) or ""))
+            except Exception:
+                pass
+
+        return " ".join(part.strip() for part in parts if str(part or "").strip())
+
+    async def _click_first_visible(self, page, selectors: List[str]) -> bool:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() <= 0 or not await locator.is_visible():
+                    continue
+                await locator.click(timeout=5000)
+                await asyncio.sleep(1)
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _has_visible_selector(self, page, selectors: List[str]) -> bool:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() > 0 and await locator.is_visible():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _wait_for_page_progress(
+        self,
+        page,
+        previous_url: str,
+        current_selectors: List[str],
+        success_selectors: Optional[List[str]] = None,
+        attempts: int = 5,
+    ) -> bool:
+        success_selectors = success_selectors or []
+        for _ in range(max(1, attempts)):
+            if str(page.url or "") != previous_url:
+                return True
+            if success_selectors and await self._has_visible_selector(page, success_selectors):
+                return True
+            if current_selectors and not await self._has_visible_selector(page, current_selectors):
+                return True
+            await asyncio.sleep(0.4)
+        return False
+
+    async def _click_button_by_text(self, page, patterns: List[str]) -> bool:
+        escaped = [re.escape(str(pattern or "").strip()) for pattern in patterns if str(pattern or "").strip()]
+        if not escaped:
+            return False
+
+        regex = re.compile("|".join(escaped), re.IGNORECASE)
+        try:
+            candidates = page.locator(BUTTON_CANDIDATE_SELECTORS)
+            count = min(await candidates.count(), 100)
+        except Exception:
+            return False
+
+        for index in range(count):
+            try:
+                locator = candidates.nth(index)
+                if not await locator.is_visible():
+                    continue
+                label = str(await self._get_locator_search_text(locator) or "").strip()
+                if not label or not regex.search(label):
+                    continue
+                await locator.click(timeout=5000)
+                await asyncio.sleep(1)
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _click_text_if_visible(self, page, patterns: List[str]) -> bool:
+        for pattern in patterns:
+            text = str(pattern or "").strip()
+            if not text:
+                continue
+            try:
+                candidate_buttons = page.locator(BUTTON_CANDIDATE_SELECTORS)
+                count = min(await candidate_buttons.count(), 40)
+                for index in range(count):
+                    locator = candidate_buttons.nth(index)
+                    if not await locator.is_visible():
+                        continue
+                    label = str(await self._get_locator_search_text(locator) or "").strip()
+                    if text.lower() not in label.lower():
+                        continue
+                    await locator.click(timeout=5000)
+                    await asyncio.sleep(1)
+                    return True
+                locator = page.get_by_text(text, exact=False).first
+                if await locator.count() <= 0:
+                    continue
+                if not await locator.is_visible():
+                    continue
+                await locator.click(timeout=5000)
+                await asyncio.sleep(1)
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _fill_and_submit_first_visible(
+        self,
+        page,
+        selectors: List[str],
+        value: str,
+        *,
+        submit_selectors: Optional[List[str]] = None,
+        submit_patterns: Optional[List[str]] = None,
+        success_selectors: Optional[List[str]] = None,
+    ) -> bool:
+        if not str(value or "").strip():
+            return False
+
+        submit_selectors = submit_selectors or []
+        submit_patterns = submit_patterns or []
+        success_selectors = success_selectors or []
+
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() <= 0 or not await locator.is_visible():
+                    continue
+                previous_url = str(page.url or "")
+                await locator.click(timeout=5000)
+                await locator.fill("", timeout=5000)
+                await locator.fill(value, timeout=5000)
+                await asyncio.sleep(0.4)
+
+                try:
+                    await locator.press("Enter", timeout=3000)
+                    if await self._wait_for_page_progress(page, previous_url, selectors, success_selectors):
+                        return True
+                except Exception:
+                    pass
+
+                if submit_selectors and await self._click_first_visible(page, submit_selectors):
+                    if await self._wait_for_page_progress(page, previous_url, selectors, success_selectors):
+                        return True
+
+                if submit_patterns and await self._click_button_by_text(page, submit_patterns):
+                    if await self._wait_for_page_progress(page, previous_url, selectors, success_selectors):
+                        return True
+            except Exception:
+                continue
+        return False
+
+    def _detect_login_blocker(self, body_text: str) -> Optional[str]:
+        text = str(body_text or "")
+        lowered = text.lower()
+        if not lowered:
+            return None
+
+        blocked_markers = [
+            (
+                [
+                    "wrong password",
+                    "密码错误",
+                    "密码不正确",
+                ],
+                "登录密码错误，请检查后重试",
+            ),
+            (
+                [
+                    "couldn’t find your google account",
+                    "couldn't find your google account",
+                    "找不到您的 google 账号",
+                    "输入有效的电子邮件地址或电话号码",
+                ],
+                "登录账号不存在或无法识别",
+            ),
+            (
+                [
+                    "2-step verification",
+                    "verify it’s you",
+                    "verify it's you",
+                    "check your phone",
+                    "验证您本人身份",
+                    "两步验证",
+                    "两步驟驗證",
+                ],
+                "该账号需要人工完成二次验证，请改用手动登录",
+            ),
+            (
+                [
+                    "too many failed attempts",
+                    "尝试次数过多",
+                    "稍后再试",
+                    "try again later",
+                ],
+                "登录尝试过多，请稍后再试",
+            ),
+            (
+                [
+                    "enter the characters",
+                    "不是您的计算机？请使用访客模式登录",
+                    "confirm you’re not a robot",
+                    "确认您不是机器人",
+                ],
+                "登录过程中需要额外人工验证，请改用手动登录",
+            ),
+        ]
+
+        for markers, message in blocked_markers:
+            if any(marker.lower() in lowered for marker in markers):
+                return message
+        return None
+
+    async def _click_account_choice(self, page, login_account: str) -> bool:
+        normalized_account = self._normalize_email(login_account or "")
+        if not normalized_account:
+            return False
+
+        attr_selectors = [
+            f'[data-identifier="{normalized_account}"]',
+            f'[data-email="{normalized_account}"]',
+        ]
+        if await self._click_first_visible(page, attr_selectors):
+            return True
+
+        try:
+            candidates = page.locator("button, [role='button'], li, div[data-identifier], div[data-email]")
+            count = min(await candidates.count(), 80)
+        except Exception:
+            count = 0
+
+        for index in range(count):
+            try:
+                locator = candidates.nth(index)
+                if not await locator.is_visible():
+                    continue
+                label = self._normalize_email(await self._get_locator_search_text(locator))
+                if normalized_account not in label:
+                    continue
+                await locator.click(timeout=5000)
+                await asyncio.sleep(1)
+                return True
+            except Exception:
+                continue
+
+        return await self._click_text_if_visible(page, [login_account])
+
+    async def _handle_chromium_signin_prompt(self, page, body_text: str) -> bool:
+        text = str(body_text or "")
+        markers = [
+            "Sign in to Chromium",
+            "登录 Chromium",
+            "Set up a work profile",
+            "设置工作资料",
+            "Use Chromium without an account",
+            "Continue as",
+        ]
+        if not self._text_contains_any(text, markers):
+            return False
+
+        if await self._click_button_by_text(page, ["Continue as", "继续作为", "以此身份继续", "Continue"]):
+            return True
+        if await self._click_button_by_text(
+            page,
+            ["Use Chromium without an account", "不使用账号", "不使用帳號", "暂不登录", "以后再说", "Not now"],
+        ):
+            return True
+        return False
+
+    async def _handle_managed_profile_prompt(self, page, body_text: str) -> bool:
+        text = str(body_text or "")
+        markers = [
+            "Continue to work in this profile",
+            "This profile will be managed",
+            "Your organization manages this profile",
+            "Create a work profile",
+            "Separate browsing for work",
+            "You're signing in with a managed account",
+            "Set up your new profile",
+            "此资料将受到管理",
+            "该资料将受到管理",
+        ]
+        if not self._text_contains_any(text, markers):
+            return False
+
+        return await self._click_button_by_text(
+            page,
+            [
+                "Continue to work in this profile",
+                "Continue",
+                "继续",
+                "I understand",
+                "我了解",
+                "我瞭解",
+                "Confirm",
+                "确认",
+                "Create profile",
+                "创建资料",
+            ],
+        )
+
+    async def _handle_profile_data_choice_prompt(self, page, body_text: str) -> bool:
+        text = str(body_text or "")
+        markers = [
+            "How do you want to handle your existing browsing data",
+            "Keep existing browsing data separate",
+            "Continue using this profile",
+            "Use existing data",
+            "Create new profile",
+            "您想如何处理现有的资料数据",
+        ]
+        if not self._text_contains_any(text, markers):
+            return False
+
+        if await self._click_text_if_visible(
+            page,
+            [
+                "Continue using this profile",
+                "Use existing data",
+                "Keep existing browsing data separate",
+                "继续使用此资料",
+                "继续使用这个资料",
+            ],
+        ):
+            return True
+
+        return await self._click_button_by_text(
+            page,
+            ["Continue", "继续", "Confirm", "确认", "Create new profile", "创建新资料"],
+        )
+
+    async def _handle_browser_settings_prompts(self, page, body_text: str) -> bool:
+        text = str(body_text or "")
+
+        positive_markers = [
+            "Turn on sync",
+            "Sync and personalize",
+            "Save and continue",
+            "Sync your stuff",
+            "Save time by syncing",
+            "开启同步",
+            "同步和个性化",
+            "保存并继续",
+        ]
+        dismiss_markers = [
+            "Make Chrome your default browser",
+            "Make Chromium your default browser",
+            "Help improve Chrome",
+            "Help improve Chromium",
+            "Import bookmarks and settings",
+            "Set as default",
+            "默认浏览器",
+            "导入书签",
+            "帮助改进",
+        ]
+
+        if self._text_contains_any(text, positive_markers):
+            return await self._click_button_by_text(
+                page,
+                [
+                    "Save and continue",
+                    "Yes, I'm in",
+                    "Turn on sync",
+                    "Continue",
+                    "继续",
+                    "保存并继续",
+                    "开启同步",
+                ],
+            )
+
+        if self._text_contains_any(text, dismiss_markers):
+            return await self._click_button_by_text(
+                page,
+                ["Not now", "No thanks", "Skip", "以后再说", "暂不", "跳过"],
+            )
+
+        return False
+
+    async def _advance_google_login(self, page, login_account: str, login_password: str) -> bool:
+        if await self._click_button_by_text(page, ["Use another account", "使用其他账号", "使用其他帳戶"]):
+            return True
+        if await self._click_account_choice(page, login_account):
+            return True
+        if await self._fill_and_submit_first_visible(
+            page,
+            ACCOUNT_INPUT_SELECTORS,
+            login_account,
+            submit_selectors=ACCOUNT_SUBMIT_SELECTORS,
+            submit_patterns=["下一步", "Next", "继续", "Continue"],
+            success_selectors=PASSWORD_INPUT_SELECTORS,
+        ):
+            return True
+        if await self._fill_and_submit_first_visible(
+            page,
+            PASSWORD_INPUT_SELECTORS,
+            login_password,
+            submit_selectors=PASSWORD_SUBMIT_SELECTORS,
+            submit_patterns=["下一步", "Next", "继续", "Continue", "登录", "Sign in"],
+            success_selectors=["[href*='labs.google']", "[data-test-id='profile-menu-button']"],
+        ):
+            return True
+        return False
+
+    async def _install_page_route(self, page) -> None:
+        async def _route(route, request):
+            try:
+                if request.resource_type in BLOCKED_RESOURCE_TYPES:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            except Exception:
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+
+        try:
+            await page.route("**/*", _route)
+        except Exception:
+            pass
+
+    async def _focus_browser_window_for_native_prompt(self) -> bool:
+        if os.name != "nt" or not DESKTOP_AUTOMATION_AVAILABLE or pygetwindow is None:
+            return False
+
+        title_keywords = [
+            "Flow - Chromium",
+            "Chromium",
+            "Google Chrome",
+        ]
+        for keyword in title_keywords:
+            try:
+                windows = [window for window in pygetwindow.getWindowsWithTitle(keyword) if getattr(window, "title", "")]
+            except Exception:
+                continue
+            if not windows:
+                continue
+
+            window = windows[0]
+            hwnd = getattr(window, "_hWnd", None)
+            try:
+                window.restore()
+            except Exception:
+                pass
+            try:
+                window.activate()
+            except Exception:
+                if hwnd and win32gui is not None and win32con is not None:
+                    try:
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        win32gui.SetForegroundWindow(hwnd)
+                    except Exception:
+                        pass
+            await asyncio.sleep(0.8)
+            return True
+        return False
+
+    async def _handle_native_chrome_profile_prompts(self) -> bool:
+        if os.name != "nt" or not DESKTOP_AUTOMATION_AVAILABLE or pyautogui is None:
+            return False
+        if not await self._focus_browser_window_for_native_prompt():
+            return False
+
+        acted = False
+        sequences = [
+            ("enter",),
+            ("tab", "enter"),
+            ("shift+tab", "enter"),
+            ("esc",),
+        ]
+        for sequence in sequences:
+            try:
+                for key in sequence:
+                    if key == "shift+tab":
+                        pyautogui.hotkey("shift", "tab")
+                    else:
+                        pyautogui.press(key)
+                    await asyncio.sleep(0.8)
+                acted = True
+            except Exception:
+                return acted
+        return acted
+
+    async def _handle_managed_account_prompts(self, page, body_text: str) -> bool:
+        if await self._click_button_by_text(page, ["Sign in with Google"]):
+            return True
+
+        if await self._handle_chromium_signin_prompt(page, body_text):
+            return True
+        if await self._handle_managed_profile_prompt(page, body_text):
+            return True
+        if await self._handle_profile_data_choice_prompt(page, body_text):
+            return True
+        if await self._handle_browser_settings_prompts(page, body_text):
+            return True
+
+        if await self._click_button_by_text(
+            page,
+            [
+                "Continue to work in this profile",
+                "Continue as",
+                "Save and continue",
+                "我瞭解",
+                "我了解",
+                "I understand",
+                "确认",
+                "Confirm",
+                "继续",
+                "Continue",
+            ],
+        ):
+            return True
+
+        return False
+
+    async def _handle_labs_onboarding(self, page, body_text: str) -> bool:
+        text = str(body_text or "")
+        if await page.locator("#marketing-emails").count() > 0 or await page.locator("#research-emails").count() > 0:
+            for selector in ("#marketing-emails", "#research-emails"):
+                try:
+                    checkbox = page.locator(selector).first
+                    if await checkbox.count() <= 0 or not await checkbox.is_visible():
+                        continue
+                    checked = str(await checkbox.get_attribute("aria-checked") or "").strip().lower() == "true"
+                    if not checked:
+                        await checkbox.click(timeout=5000)
+                        await asyncio.sleep(0.3)
+                except Exception:
+                    continue
+            if await self._click_button_by_text(page, ["下一步", "Next", "继续", "Continue"]):
+                return True
+
+        onboarding_markers = [
+            "体验 AI 工具的创造力",
+            "Experience the creativity",
+            "查看我们的《隐私权政策》",
+            "隐私权政策",
+            "Privacy Policy",
+            "Your data and labs.google/fx",
+            "Welcome to",
+            "Get started",
+            "Start using",
+            "Introducing",
+        ]
+        if any(marker.lower() in text.lower() for marker in onboarding_markers):
+            try:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+            if await self._click_button_by_text(
+                page,
+                ["继续", "Continue", "同意", "Agree", "下一步", "Next", "Got it", "Done", "Skip", "Accept", "Start", "OK"],
+            ):
+                return True
+
+        return False
+
+    async def _is_labs_session_ready(self, page, body_text: str) -> bool:
+        url = str(page.url or "").lower()
+        if "labs.google" not in url:
+            return False
+        if "accounts.google.com" in url:
+            return False
+
+        text = str(body_text or "")
+        blocked_markers = [
+            "体验 AI 工具的创造力",
+            "Experience the creativity",
+            "查看我们的《隐私权政策》",
+            "Privacy Policy",
+            "登录 Chrome",
+            "Sign in to Chromium",
+            "Set up a work profile",
+            "Use Chromium without an account",
+            "Continue to work in this profile",
+            "How do you want to handle your existing browsing data",
+            "Turn on sync",
+            "Save and continue",
+            "Sign in with Google",
+            "Too many failed attempts",
+        ]
+        if any(marker.lower() in text.lower() for marker in blocked_markers):
+            return False
+
+        try:
+            if await page.locator(", ".join(ACCOUNT_INPUT_SELECTORS + PASSWORD_INPUT_SELECTORS)).count() > 0:
+                return False
+        except Exception:
+            return False
+
+        return True
+
+    async def _settle_labs_session(self, profile: Dict[str, Any], context: BrowserContext, page) -> Optional[str]:
+        native_prompt_attempts = 0
+        for _ in range(40):
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=3000)
+            except Exception:
+                pass
+
+            body_text = await self._safe_page_text(page)
+
+            if native_prompt_attempts < 3 and not str(body_text or "").strip() and await self._handle_native_chrome_profile_prompts():
+                native_prompt_attempts += 1
+                logger.info(f"[{profile['name']}] 已处理 Chromium 原生资料提示")
+                continue
+
+            if await self._handle_managed_account_prompts(page, body_text):
+                logger.info(f"[{profile['name']}] 已处理 Google / 资料确认提示")
+                continue
+
+            if await self._handle_labs_onboarding(page, body_text):
+                logger.info(f"[{profile['name']}] 已处理 labs 首次引导")
+                continue
+
+            if await self._is_labs_session_ready(page, body_text):
+                logger.info(f"[{profile['name']}] labs 会话页面已就绪")
+                break
+
+            await asyncio.sleep(1.0)
+
+        token = await self._get_session_cookie(context)
+        deadline = asyncio.get_running_loop().time() + 12.0
+        while asyncio.get_running_loop().time() < deadline:
+            token = await self._get_session_cookie(context)
+            if token:
+                break
+            await asyncio.sleep(0.5)
+
+        if not token:
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+            token = await self._get_session_cookie(context)
+
+        if token:
+            for _ in range(4):
+                body_text = await self._safe_page_text(page)
+                if await self._handle_managed_account_prompts(page, body_text):
+                    continue
+                if await self._handle_labs_onboarding(page, body_text):
+                    continue
+                break
+        return token
+
+    async def _persist_login_state(
+        self,
+        profile_id: int,
+        token: Optional[str],
+        email: Optional[str] = None,
+        is_logged_in: Optional[bool] = None,
+    ) -> None:
+        logged_in = bool(token) if is_logged_in is None else bool(is_logged_in)
+        update_data: Dict[str, Any] = {"is_logged_in": 1 if logged_in else 0}
+        if token:
+            update_data["last_token"] = self._mask_token(token)
+            update_data["last_token_time"] = datetime.now().isoformat()
+        normalized_email = self._normalize_email(email or "")
+        if normalized_email:
+            update_data["email"] = normalized_email
+        await profile_db.update_profile(profile_id, **update_data)
 
     def _parse_cookies_payload(self, cookies_json: str) -> List[Dict[str, Any]]:
         data = json.loads(cookies_json)
@@ -237,124 +989,15 @@ class BrowserManager:
         return out
 
     async def _get_session_cookie(self, context: BrowserContext) -> Optional[str]:
-        """
-        Read the Flow session cookie from all domains.
-        Note: labs.google is a .google TLD domain, while Google auth cookies usually live on .google.com.
-        """
         try:
-            cookies = await context.cookies()
+            cookies = await context.cookies("https://labs.google")
         except Exception:
-            return None
-
-        # Prefer labs.google domain cookie when available.
-        for cookie in cookies:
-            if (
-                cookie.get("name") == config.session_cookie_name
-                and "labs.google" in str(cookie.get("domain") or "")
-            ):
-                value = cookie.get("value")
-                if value:
-                    return value
+            cookies = await context.cookies()
 
         for cookie in cookies:
             if cookie.get("name") == config.session_cookie_name:
-                value = cookie.get("value")
-                if value:
-                    return value
+                return cookie.get("value")
         return None
-
-    async def _get_cookie_value(
-        self,
-        context: BrowserContext,
-        cookie_name: str,
-        domain_hint: str | None = None,
-    ) -> Optional[str]:
-        try:
-            cookies = await context.cookies()
-        except Exception:
-            return None
-
-        if domain_hint:
-            for cookie in cookies:
-                if cookie.get("name") != cookie_name:
-                    continue
-                if domain_hint in str(cookie.get("domain") or ""):
-                    value = cookie.get("value")
-                    if value:
-                        return value
-
-        for cookie in cookies:
-            if cookie.get("name") == cookie_name:
-                value = cookie.get("value")
-                if value:
-                    return value
-        return None
-
-    async def _get_gemini_cookie_pair(self, context: BrowserContext) -> Optional[Dict[str, str]]:
-        secure_1psid = await self._get_cookie_value(
-            context, "__Secure-1PSID", domain_hint="google.com"
-        )
-        secure_1psidts = await self._get_cookie_value(
-            context, "__Secure-1PSIDTS", domain_hint="google.com"
-        )
-        if not secure_1psid or not secure_1psidts:
-            return None
-        return {
-            "secure_1psid": secure_1psid,
-            "secure_1psidts": secure_1psidts,
-        }
-
-    def _resolve_extract_mode(self, profile: Dict[str, Any]) -> str:
-        remark = str(profile.get("remark") or "").strip().lower()
-        if remark:
-            if any(
-                token in remark
-                for token in (
-                    "extract=gemini_cookies",
-                    "mode=gemini_cookies",
-                    "gemini-fastapi",
-                    "gemini_fastapi",
-                    "[gemini]",
-                )
-            ):
-                return "gemini_cookies"
-            if any(
-                token in remark
-                for token in (
-                    "extract=session",
-                    "mode=session",
-                    "flow2api",
-                    "[flow2api]",
-                )
-            ):
-                return "session"
-        fallback = str(config.token_extract_mode or "").strip().lower()
-        if fallback in {"session", "gemini_cookies"}:
-            return fallback
-        return "session"
-
-    def _resolve_gemini_client_id(self, profile: Dict[str, Any]) -> str:
-        profile_id = profile.get("id")
-        if profile_id is not None:
-            return f"profile-{profile_id}"
-        base = str(profile.get("email") or profile.get("name") or "profile").strip().lower()
-        base = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in base).strip("-")
-        return base or "profile"
-
-    def _build_gemini_session_token(self, profile: Dict[str, Any], payload: Dict[str, str]) -> str:
-        client_id = self._resolve_gemini_client_id(profile)
-        body = {
-            "version": 1,
-            "type": "gemini_cookie_pair",
-            "client_id": client_id,
-            "email": client_id,
-            "secure_1psid": payload["secure_1psid"],
-            "secure_1psidts": payload["secure_1psidts"],
-            "proxy": profile.get("proxy_url") if profile.get("proxy_enabled") else None,
-        }
-        raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        encoded = base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
-        return f"gcu:v1:{encoded}"
 
     async def import_cookies(self, profile_id: int, cookies_json: str) -> Dict[str, Any]:
         """导入 Cookie（JSON），写入到持久化 profile 中"""
@@ -402,11 +1045,10 @@ class BrowserManager:
                 await context.add_cookies(cookies)
                 token = await self._get_session_cookie(context)
 
-                await profile_db.update_profile(
+                await self._persist_login_state(
                     profile_id,
-                    is_logged_in=1 if token else 0,
-                    last_token=self._mask_token(token) if token else None,
-                    last_token_time=datetime.now().isoformat() if token else None,
+                    token,
+                    email=self._resolve_known_email(profile),
                 )
 
                 return {
@@ -485,13 +1127,19 @@ class BrowserManager:
             if self._active_context:
                 # 检查登录状态
                 is_logged_in = False
+                profile = await profile_db.get_profile(profile_id)
                 try:
                     cookies = await self._active_context.cookies("https://labs.google")
                     is_logged_in = any(c["name"] == config.session_cookie_name for c in cookies)
                 except Exception:
                     pass
 
-                await profile_db.update_profile(profile_id, is_logged_in=int(is_logged_in))
+                await self._persist_login_state(
+                    profile_id,
+                    None,
+                    email=self._resolve_known_email(profile or {}),
+                    is_logged_in=is_logged_in,
+                )
                 await self._close_active()
                 await self._stop_vnc_stack()
 
@@ -562,95 +1210,23 @@ class BrowserManager:
         page = None
         try:
             page = await context.new_page()
+            await self._install_page_route(page)
 
-            async def _route(route, request):
-                try:
-                    if request.resource_type in BLOCKED_RESOURCE_TYPES:
-                        await route.abort()
-                    else:
-                        await route.continue_()
-                except Exception:
-                    try:
-                        await route.continue_()
-                    except Exception:
-                        pass
-
-            try:
-                await page.route("**/*", _route)
-            except Exception:
-                pass
-
-            # 访问 signin 页面并点击 Sign in with Google 按钮刷新 session
+            # 访问 labs 页面，必要时自动推进 Google / 托管资料 / labs 首次引导。
             logger.info(f"[{profile['name']}] 访问 {config.labs_url} 刷新 session...")
             await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=60000)
 
-            # 点击 Sign in with Google 按钮（提交 POST 表单）
-            try:
-                submit_btn = page.locator("button[type='submit']")
-                await submit_btn.wait_for(state="visible", timeout=10000)
-                await submit_btn.click()
-                logger.info(f"[{profile['name']}] 已点击 Sign in with Google，等待跳转...")
-            except Exception as e:
-                logger.warning(f"[{profile['name']}] 点击登录按钮失败: {e}，尝试直接检查 cookie")
+            token = await self._settle_labs_session(profile, context, page)
+            body_text = await self._safe_page_text(page)
 
-            # 等待跳转到 https://labs.google/ 并提取 cookie
-            try:
-                await page.wait_for_url("https://labs.google/**", timeout=30000)
-                logger.info(f"[{profile['name']}] 已成功跳转到 labs.google")
-            except Exception as e:
-                logger.warning(f"[{profile['name']}] 等待跳转超时: {e}")
-
-            token = None
-            token_preview = None
-            if self._resolve_extract_mode(profile) == "gemini_cookies":
-                pair = await self._get_gemini_cookie_pair(context)
-                deadline = asyncio.get_running_loop().time() + 12.0
-                while asyncio.get_running_loop().time() < deadline:
-                    pair = await self._get_gemini_cookie_pair(context)
-                    if pair:
-                        break
-                    await asyncio.sleep(0.5)
-
-                if not pair:
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=8000)
-                    except Exception:
-                        pass
-                    pair = await self._get_gemini_cookie_pair(context)
-
-                if pair:
-                    token = self._build_gemini_session_token(profile, pair)
-                    token_preview = pair["secure_1psidts"]
-            else:
-                # 等待 cookie 更新：优先轮询 session cookie，减少资源占用
-                token = await self._get_session_cookie(context)
-                deadline = asyncio.get_running_loop().time() + 12.0
-                while asyncio.get_running_loop().time() < deadline:
-                    token = await self._get_session_cookie(context)
-                    if token:
-                        break
-                    await asyncio.sleep(0.5)
-
-                if not token:
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=8000)
-                    except Exception:
-                        pass
-                    token = await self._get_session_cookie(context)
-                token_preview = token
-
+            await self._persist_login_state(
+                profile["id"],
+                token,
+                email=self._resolve_known_email(profile, body_text),
+            )
             if token:
-                update_data: Dict[str, Any] = {
-                    "is_logged_in": 1,
-                    "last_token": self._mask_token(token_preview or token),
-                    "last_token_time": datetime.now().isoformat(),
-                }
-                if self._resolve_extract_mode(profile) == "gemini_cookies" and not profile.get("email"):
-                    update_data["email"] = self._stable_profile_identity(profile)
-                await profile_db.update_profile(profile["id"], **update_data)
                 logger.info(f"[{profile['name']}] Token 提取成功")
             else:
-                await profile_db.update_profile(profile["id"], is_logged_in=0)
                 logger.warning(f"[{profile['name']}] 未找到 Token，会话可能已过期")
 
             return token
@@ -665,6 +1241,116 @@ class BrowserManager:
                 except Exception:
                     pass
 
+    async def auto_login(self, profile_id: int) -> Dict[str, Any]:
+        profile = await profile_db.get_profile(profile_id)
+        if not profile:
+            return {"success": False, "error": "Profile 不存在"}
+
+        login_account = str(profile.get("login_account") or "").strip()
+        login_password = str(profile.get("login_password") or "").strip()
+        if not login_account or not login_password:
+            return {"success": False, "error": "请先为该账号配置登录账号和登录密码"}
+
+        async with self._lock:
+            await self._close_active()
+
+            context = None
+            page = None
+            use_vnc = False
+            try:
+                if not self._playwright:
+                    await self.start()
+
+                profile_dir = self._get_profile_dir(profile_id)
+                os.makedirs(profile_dir, exist_ok=True)
+                self._clean_locks(profile_dir)
+                proxy = await self._get_proxy(profile)
+
+                if config.enable_vnc:
+                    use_vnc = await self._ensure_vnc_stack()
+
+                context = await self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    headless=not use_vnc,
+                    viewport={"width": 1280, "height": 900},
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                    proxy=proxy,
+                    args=LOGIN_BROWSER_ARGS if use_vnc else BROWSER_ARGS,
+                    ignore_default_args=["--enable-automation"],
+                )
+
+                page = context.pages[0] if context.pages else await context.new_page()
+                await self._install_page_route(page)
+                await page.goto(config.login_url, wait_until="domcontentloaded", timeout=60000)
+
+                for _ in range(45):
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=3000)
+                    except Exception:
+                        pass
+
+                    body_text = await self._safe_page_text(page)
+                    blocker = self._detect_login_blocker(body_text)
+                    if blocker:
+                        await self._persist_login_state(
+                            profile_id,
+                            None,
+                            email=self._resolve_known_email(profile, body_text),
+                        )
+                        return {"success": False, "error": blocker, "requires_manual_action": True}
+
+                    if use_vnc and not str(body_text or "").strip() and await self._handle_native_chrome_profile_prompts():
+                        continue
+
+                    if await self._handle_managed_account_prompts(page, body_text):
+                        continue
+
+                    if await self._advance_google_login(page, login_account, login_password):
+                        continue
+
+                    if await self._handle_labs_onboarding(page, body_text):
+                        continue
+
+                    if await self._is_labs_session_ready(page, body_text):
+                        break
+
+                    await asyncio.sleep(1.0)
+
+                token = await self._settle_labs_session(profile, context, page)
+                body_text = await self._safe_page_text(page)
+                await self._persist_login_state(
+                    profile_id,
+                    token,
+                    email=self._resolve_known_email(profile, body_text),
+                )
+                if not token:
+                    return {"success": False, "error": "未获取到会话令牌，请改用手动登录"}
+
+                return {
+                    "success": True,
+                    "is_logged_in": True,
+                    "has_token": True,
+                    "profile_name": profile["name"],
+                }
+
+            except Exception as e:
+                logger.error(f"[{profile['name']}] 自动登录失败: {e}")
+                return {"success": False, "error": str(e)}
+            finally:
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                if context:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                if use_vnc:
+                    await self._stop_vnc_stack()
+
     async def check_login_status(self, profile_id: int) -> Dict[str, Any]:
         """检查登录状态"""
         profile = await profile_db.get_profile(profile_id)
@@ -672,14 +1358,11 @@ class BrowserManager:
             return {"success": False, "error": "Profile 不存在"}
 
         token = await self.peek_token(profile_id)
-        update_data: Dict[str, Any] = {"is_logged_in": 1 if token else 0}
-        if (
-            token
-            and self._resolve_extract_mode(profile) == "gemini_cookies"
-            and not profile.get("email")
-        ):
-            update_data["email"] = self._stable_profile_identity(profile)
-        await profile_db.update_profile(profile_id, **update_data)
+        await self._persist_login_state(
+            profile_id,
+            token,
+            email=self._resolve_known_email(profile),
+        )
         return {
             "success": True,
             "is_logged_in": token is not None,
@@ -698,9 +1381,6 @@ class BrowserManager:
                 return None
 
             if self._active_profile_id == profile_id and self._active_context:
-                if self._resolve_extract_mode(profile) == "gemini_cookies":
-                    pair = await self._get_gemini_cookie_pair(self._active_context)
-                    return self._build_gemini_session_token(profile, pair) if pair else None
                 return await self._get_session_cookie(self._active_context)
 
             context = None
@@ -720,9 +1400,6 @@ class BrowserManager:
                     args=BROWSER_ARGS,
                     ignore_default_args=["--enable-automation"],
                 )
-                if self._resolve_extract_mode(profile) == "gemini_cookies":
-                    pair = await self._get_gemini_cookie_pair(context)
-                    return self._build_gemini_session_token(profile, pair) if pair else None
                 return await self._get_session_cookie(context)
             except Exception:
                 return None

@@ -17,6 +17,7 @@ from .browser import browser_manager
 from .config import config
 from .database import profile_db
 from .events import dashboard_events
+from .execution import execution_gate
 from .logger import logger
 from .proxy_utils import validate_proxy_format
 from .updater import token_syncer
@@ -46,6 +47,9 @@ MAX_REMARK_LEN = 200
 MAX_PROXY_LEN = 512
 MAX_FLOW2API_URL_LEN = 512
 MAX_CONNECTION_TOKEN_LEN = 2048
+MAX_LOGIN_ACCOUNT_LEN = 320
+MAX_LOGIN_PASSWORD_LEN = 512
+MAX_IMPORT_CONTENT_LEN = 100_000
 
 
 def _session_ttl_seconds() -> int:
@@ -128,6 +132,89 @@ def _validate_connection_token(connection_token: str) -> str:
     if len(clean) > MAX_CONNECTION_TOKEN_LEN:
         raise HTTPException(400, "连接 Token 过长")
     return clean
+
+
+def _validate_login_account(login_account: str) -> str:
+    clean = login_account.strip()
+    if len(clean) > MAX_LOGIN_ACCOUNT_LEN:
+        raise HTTPException(400, "登录账号过长")
+    return clean
+
+
+def _validate_login_password(login_password: str) -> str:
+    clean = login_password.strip()
+    if len(clean) > MAX_LOGIN_PASSWORD_LEN:
+        raise HTTPException(400, "登录密码过长")
+    return clean
+
+
+def _normalize_login_credentials(login_account: str, login_password: str) -> tuple[str, str]:
+    account = _validate_login_account(login_account or "")
+    password = _validate_login_password(login_password or "")
+    if bool(account) != bool(password):
+        raise HTTPException(400, "登录账号和登录密码需要同时提供")
+    return account, password
+
+
+def _resolve_login_credentials(
+    current_account: str,
+    current_password: str,
+    next_account: str | None,
+    next_password: str | None,
+    *,
+    clear: bool = False,
+) -> tuple[str, str]:
+    if clear:
+        return "", ""
+
+    merged_account = current_account or ""
+    merged_password = current_password or ""
+    if next_account is not None:
+        merged_account = next_account
+    if next_password is not None:
+        merged_password = next_password
+    return _normalize_login_credentials(merged_account, merged_password)
+
+
+def _split_import_line(line: str) -> tuple[str, str, str]:
+    for delimiter in ("----", "\t", ",", "|"):
+        if delimiter not in line:
+            continue
+        parts = [part.strip() for part in line.split(delimiter, 2)]
+        if len(parts) == 2:
+            return parts[0], parts[0], parts[1]
+        if len(parts) == 3:
+            return parts[0], parts[1], parts[2]
+    raise HTTPException(400, f"导入格式错误：{line}")
+
+
+def _parse_account_import_content(content: str) -> List[Dict[str, str]]:
+    raw = str(content or "")
+    if len(raw) > MAX_IMPORT_CONTENT_LEN:
+        raise HTTPException(400, "导入内容过大")
+
+    items: List[Dict[str, str]] = []
+    for line_number, line in enumerate(raw.splitlines(), start=1):
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        try:
+            name, login_account, login_password = _split_import_line(text)
+            name = _validate_name(name)
+            login_account, login_password = _normalize_login_credentials(login_account, login_password)
+        except HTTPException as exc:
+            raise HTTPException(exc.status_code, f"第 {line_number} 行：{exc.detail}") from exc
+        items.append(
+            {
+                "name": name,
+                "login_account": login_account,
+                "login_password": login_password,
+            }
+        )
+
+    if not items:
+        raise HTTPException(400, "没有可导入的账号，请按行粘贴账号密码")
+    return items
 
 def _normalize_dashboard_hours(hours: int | None) -> int:
     if hours in DASHBOARD_HOURS_OPTIONS:
@@ -318,6 +405,10 @@ def _serialize_profile(
     data["uses_default_target"] = not bool(data.get("flow2api_url"))
     data["has_connection_token_override"] = bool(data.get("connection_token_override"))
     data["connection_token_override_preview"] = _mask_secret(data.get("connection_token_override") or "")
+    data["login_account"] = data.get("login_account") or ""
+    data["has_login_password"] = bool(data.get("login_password"))
+    data["has_login_credentials"] = bool(data["login_account"] and data.get("login_password"))
+    data["login_password_preview"] = _mask_secret(data.get("login_password") or "")
     data["target_label"] = _target_label(data["effective_flow2api_url"])
 
     if data.get("proxy_url"):
@@ -327,8 +418,10 @@ def _serialize_profile(
 
     if include_secret:
         data["connection_token_override"] = data.get("connection_token_override") or ""
+        data["login_password"] = data.get("login_password") or ""
     else:
         data.pop("connection_token_override", None)
+        data.pop("login_password", None)
 
     return data
 
@@ -363,6 +456,7 @@ async def _build_dashboard_payload(hours: int = 24) -> Dict[str, Any]:
 
     return {
         "browser": browser_manager.get_status(),
+        "execution": execution_gate.get_status(),
         "syncer": token_syncer.get_status(),
         "config": _public_config(),
         "profiles": profiles,
@@ -417,6 +511,8 @@ class LoginRequest(BaseModel):
 class CreateProfileRequest(BaseModel):
     name: str
     remark: Optional[str] = ""
+    login_account: Optional[str] = ""
+    login_password: Optional[str] = ""
     proxy_url: Optional[str] = ""
     flow2api_url: Optional[str] = ""
     connection_token_override: Optional[str] = ""
@@ -426,6 +522,9 @@ class UpdateProfileRequest(BaseModel):
     name: Optional[str] = None
     remark: Optional[str] = None
     is_active: Optional[bool] = None
+    login_account: Optional[str] = None
+    login_password: Optional[str] = None
+    clear_login_credentials: Optional[bool] = None
     proxy_url: Optional[str] = None
     proxy_enabled: Optional[bool] = None
     flow2api_url: Optional[str] = None
@@ -440,6 +539,11 @@ class UpdateConfigRequest(BaseModel):
 
 class ImportCookiesRequest(BaseModel):
     cookies_json: str
+
+
+class ImportAccountsRequest(BaseModel):
+    content: str
+    update_existing: bool = True
 
 
 async def verify_session(authorization: str = Header(None)):
@@ -491,6 +595,7 @@ async def get_status(token: str = Depends(verify_session)):
     profiles = await profile_db.get_all_profiles()
     return {
         "browser": browser_manager.get_status(),
+        "execution": execution_gate.get_status(),
         "syncer": token_syncer.get_status(),
         "profiles": {
             "total": len(profiles),
@@ -535,6 +640,10 @@ async def get_profiles(token: str = Depends(verify_session)):
 async def create_profile(request: CreateProfileRequest, token: str = Depends(verify_session)):
     name = _validate_name(request.name)
     remark = _validate_remark(request.remark or "")
+    login_account, login_password = _normalize_login_credentials(
+        request.login_account or "",
+        request.login_password or "",
+    )
     proxy_url = _validate_proxy(request.proxy_url or "")
     flow2api_url = _validate_flow2api_url(request.flow2api_url or "")
     connection_token_override = _validate_connection_token(request.connection_token_override or "")
@@ -543,11 +652,13 @@ async def create_profile(request: CreateProfileRequest, token: str = Depends(ver
         raise HTTPException(400, "名称已存在")
 
     profile_id = await profile_db.add_profile(
-        name,
-        remark,
-        proxy_url,
-        flow2api_url,
-        connection_token_override,
+        name=name,
+        remark=remark,
+        login_account=login_account,
+        login_password=login_password,
+        proxy_url=proxy_url,
+        flow2api_url=flow2api_url,
+        connection_token_override=connection_token_override,
     )
     await dashboard_events.publish("profile_created", {"profile_id": profile_id})
     return {"success": True, "profile_id": profile_id}
@@ -582,6 +693,20 @@ async def update_profile(profile_id: int, request: UpdateProfileRequest, token: 
         update_data["remark"] = _validate_remark(request.remark)
     if request.is_active is not None:
         update_data["is_active"] = int(request.is_active)
+    if (
+        request.clear_login_credentials
+        or request.login_account is not None
+        or request.login_password is not None
+    ):
+        login_account, login_password = _resolve_login_credentials(
+            profile.get("login_account") or "",
+            profile.get("login_password") or "",
+            request.login_account,
+            request.login_password,
+            clear=bool(request.clear_login_credentials),
+        )
+        update_data["login_account"] = login_account
+        update_data["login_password"] = login_password
     if request.proxy_url is not None:
         proxy_url = _validate_proxy(request.proxy_url)
         update_data["proxy_url"] = proxy_url
@@ -601,14 +726,66 @@ async def update_profile(profile_id: int, request: UpdateProfileRequest, token: 
     return {"success": True}
 
 
+@app.post("/api/profiles/import-accounts")
+async def import_accounts(request: ImportAccountsRequest, token: str = Depends(verify_session)):
+    items = _parse_account_import_content(request.content)
+    created = 0
+    updated = 0
+    skipped = 0
+
+    for item in items:
+        existing = await profile_db.get_profile_by_name(item["name"])
+        if existing:
+            if not request.update_existing:
+                skipped += 1
+                continue
+            await profile_db.update_profile(
+                existing["id"],
+                login_account=item["login_account"],
+                login_password=item["login_password"],
+            )
+            updated += 1
+            continue
+
+        await profile_db.add_profile(
+            name=item["name"],
+            login_account=item["login_account"],
+            login_password=item["login_password"],
+        )
+        created += 1
+
+    if created or updated:
+        await dashboard_events.publish(
+            "profiles_imported",
+            {
+                "created": created,
+                "updated": updated,
+                "skipped": skipped,
+                "total": len(items),
+            },
+        )
+    return {
+        "success": True,
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "total": len(items),
+    }
+
+
 @app.delete("/api/profiles/{profile_id}")
 async def delete_profile(profile_id: int, token: str = Depends(verify_session)):
     profile = await profile_db.get_profile(profile_id)
     if not profile:
         raise HTTPException(404, "不存在")
-    await browser_manager.close_browser(profile_id)
-    await browser_manager.delete_profile_data(profile_id)
-    await profile_db.delete_profile(profile_id)
+    async with execution_gate.hold(
+        "delete_profile",
+        profile_id=profile_id,
+        profile_name=profile.get("name", ""),
+    ):
+        await browser_manager.close_browser(profile_id)
+        await browser_manager.delete_profile_data(profile_id)
+        await profile_db.delete_profile(profile_id)
     await dashboard_events.publish("profile_deleted", {"profile_id": profile_id})
     return {"success": True}
 
@@ -617,7 +794,15 @@ async def delete_profile(profile_id: int, token: str = Depends(verify_session)):
 async def launch_browser(profile_id: int, token: str = Depends(verify_session)):
     if not config.enable_vnc:
         raise HTTPException(400, "已禁用 VNC 登录（设置 ENABLE_VNC=1 可启用）")
-    success = await browser_manager.launch_for_login(profile_id)
+    profile = await profile_db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(404, "不存在")
+    async with execution_gate.hold(
+        "launch_browser",
+        profile_id=profile_id,
+        profile_name=profile.get("name", ""),
+    ):
+        success = await browser_manager.launch_for_login(profile_id)
     if not success:
         raise HTTPException(500, "启动失败")
     await dashboard_events.publish("browser_launch", {"profile_id": profile_id})
@@ -626,14 +811,30 @@ async def launch_browser(profile_id: int, token: str = Depends(verify_session)):
 
 @app.post("/api/profiles/{profile_id}/close")
 async def close_browser(profile_id: int, token: str = Depends(verify_session)):
-    result = await browser_manager.close_browser(profile_id)
+    profile = await profile_db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(404, "不存在")
+    async with execution_gate.hold(
+        "close_browser",
+        profile_id=profile_id,
+        profile_name=profile.get("name", ""),
+    ):
+        result = await browser_manager.close_browser(profile_id)
     await dashboard_events.publish("browser_close", {"profile_id": profile_id})
     return result
 
 
 @app.post("/api/profiles/{profile_id}/check-login")
 async def check_login(profile_id: int, token: str = Depends(verify_session)):
-    result = await browser_manager.check_login_status(profile_id)
+    profile = await profile_db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(404, "不存在")
+    async with execution_gate.hold(
+        "check_login",
+        profile_id=profile_id,
+        profile_name=profile.get("name", ""),
+    ):
+        result = await browser_manager.check_login_status(profile_id)
     await dashboard_events.publish("login_checked", {"profile_id": profile_id})
     return result
 
@@ -643,16 +844,52 @@ async def import_cookies(profile_id: int, request: ImportCookiesRequest, token: 
     cookies_json = (request.cookies_json or "").strip()
     if not cookies_json:
         raise HTTPException(400, "Cookie 内容不能为空")
-    result = await browser_manager.import_cookies(profile_id, cookies_json)
+    profile = await profile_db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(404, "不存在")
+    async with execution_gate.hold(
+        "import_cookies",
+        profile_id=profile_id,
+        profile_name=profile.get("name", ""),
+    ):
+        result = await browser_manager.import_cookies(profile_id, cookies_json)
     if not result.get("success"):
         raise HTTPException(400, result.get("error") or "导入失败")
     await dashboard_events.publish("cookies_imported", {"profile_id": profile_id})
     return result
 
 
+@app.post("/api/profiles/{profile_id}/auto-login")
+async def auto_login_profile(profile_id: int, token: str = Depends(verify_session)):
+    profile = await profile_db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(404, "不存在")
+    async with execution_gate.hold(
+        "auto_login",
+        profile_id=profile_id,
+        profile_name=profile.get("name", ""),
+    ):
+        result = await browser_manager.auto_login(profile_id)
+    await dashboard_events.publish(
+        "profile_auto_login",
+        {"profile_id": profile_id, "success": bool(result.get("success"))},
+    )
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error") or "自动登录失败")
+    return result
+
+
 @app.post("/api/profiles/{profile_id}/extract")
 async def extract_token(profile_id: int, token: str = Depends(verify_session)):
-    extracted = await browser_manager.extract_token(profile_id)
+    profile = await profile_db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(404, "不存在")
+    async with execution_gate.hold(
+        "extract_token",
+        profile_id=profile_id,
+        profile_name=profile.get("name", ""),
+    ):
+        extracted = await browser_manager.extract_token(profile_id)
     if extracted:
         return {"success": True, "token_length": len(extracted)}
     return {"success": False, "message": "未找到 Token，请先登录"}
@@ -660,7 +897,7 @@ async def extract_token(profile_id: int, token: str = Depends(verify_session)):
 
 @app.post("/api/profiles/{profile_id}/sync")
 async def sync_profile(profile_id: int, token: str = Depends(verify_session)):
-    result = await token_syncer.sync_profile(profile_id)
+    result = await token_syncer.sync_profile(profile_id, source="manual")
     await dashboard_events.publish(
         "manual_sync",
         {"profile_id": profile_id, "success": bool(result.get("success"))},
@@ -670,7 +907,7 @@ async def sync_profile(profile_id: int, token: str = Depends(verify_session)):
 
 @app.post("/api/sync-all")
 async def sync_all(token: str = Depends(verify_session)):
-    result = await token_syncer.sync_all_profiles()
+    result = await token_syncer.sync_all_profiles(source="manual")
     await dashboard_events.publish(
         "manual_sync_all",
         {

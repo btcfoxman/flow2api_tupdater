@@ -34,6 +34,8 @@ class ProfileDB:
                     error_count INTEGER DEFAULT 0,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     remark TEXT,
+                    login_account TEXT,
+                    login_password TEXT,
                     proxy_url TEXT,
                     proxy_enabled INTEGER DEFAULT 0,
                     flow2api_url TEXT,
@@ -47,6 +49,10 @@ class ProfileDB:
             
             if 'proxy_url' not in columns:
                 await db.execute("ALTER TABLE profiles ADD COLUMN proxy_url TEXT")
+            if 'login_account' not in columns:
+                await db.execute("ALTER TABLE profiles ADD COLUMN login_account TEXT")
+            if 'login_password' not in columns:
+                await db.execute("ALTER TABLE profiles ADD COLUMN login_password TEXT")
             if 'proxy_enabled' not in columns:
                 await db.execute("ALTER TABLE profiles ADD COLUMN proxy_enabled INTEGER DEFAULT 0")
             if 'flow2api_url' not in columns:
@@ -84,6 +90,8 @@ class ProfileDB:
         self,
         name: str,
         remark: str = "",
+        login_account: str = "",
+        login_password: str = "",
         proxy_url: str = "",
         flow2api_url: str = "",
         connection_token_override: str = "",
@@ -95,16 +103,20 @@ class ProfileDB:
                 INSERT INTO profiles (
                     name,
                     remark,
+                    login_account,
+                    login_password,
                     proxy_url,
                     proxy_enabled,
                     flow2api_url,
                     connection_token_override,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     name,
                     remark,
+                    login_account,
+                    login_password,
                     proxy_url,
                     1 if proxy_url else 0,
                     flow2api_url,
