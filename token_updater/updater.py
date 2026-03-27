@@ -11,6 +11,7 @@ from .config import config
 from .database import profile_db
 from .events import dashboard_events
 from .execution import execution_gate
+from .gemini_bridge import gemini_cookie_bridge
 from .logger import logger
 
 
@@ -235,26 +236,47 @@ class TokenSyncer:
             return {"success": False, "error": error, "target_url": flow2api_url}
 
         logger.info(f"[{profile['name']}] 开始同步 -> {flow2api_url}")
+        extract_mode = self._resolve_extract_mode(profile)
+        token_to_push = ""
 
-        token = await browser_manager.extract_token(profile_id)
-        if not token:
-            error = "无法提取 Token，请先登录"
-            await self._update_profile_check_result(
-                profile_id,
-                last_sync_time=datetime.now().isoformat(),
-                result="failed: no token",
-                last_sync_result="failed: no token",
-                error_count=profile.get("error_count", 0) + 1,
+        if extract_mode == "gemini_cookies":
+            gemini_result = await gemini_cookie_bridge.build_plugin_session_token(profile)
+            if not gemini_result["success"]:
+                error = str(gemini_result.get("error") or "无法提取 Gemini cookies")
+                await self._update_profile_check_result(
+                    profile_id,
+                    last_sync_time=datetime.now().isoformat(),
+                    result="failed: no gemini cookies",
+                    last_sync_result=f"failed: {error}",
+                    error_count=profile.get("error_count", 0) + 1,
+                )
+                self._total_error_count += 1
+                await self._record_sync_result(profile, flow2api_url, False, message=error)
+                return {"success": False, "error": error, "target_url": flow2api_url}
+
+            token_to_push = str(gemini_result["session_token"])
+            logger.info(
+                f"[{profile['name']}] 提取到 Gemini cookies 并编码为 gcu payload (client_id={gemini_result.get('client_id')})"
             )
-            self._total_error_count += 1
-            await self._record_sync_result(profile, flow2api_url, False, message=error)
-            return {"success": False, "error": error, "target_url": flow2api_url}
-
-        if self._resolve_extract_mode(profile) == "gemini_cookies":
-            logger.info(f"[{profile['name']}] 提取到 Gemini 凭据令牌")
         else:
+            token = await browser_manager.extract_token(profile_id)
+            if not token:
+                error = "无法提取 Token，请先登录"
+                await self._update_profile_check_result(
+                    profile_id,
+                    last_sync_time=datetime.now().isoformat(),
+                    result="failed: no token",
+                    last_sync_result="failed: no token",
+                    error_count=profile.get("error_count", 0) + 1,
+                )
+                self._total_error_count += 1
+                await self._record_sync_result(profile, flow2api_url, False, message=error)
+                return {"success": False, "error": error, "target_url": flow2api_url}
+
             logger.info(f"[{profile['name']}] 提取到 Token: {token[:20]}...{token[-10:]}")
-        result = await self._push_to_flow2api(token, flow2api_url, connection_token)
+            token_to_push = token
+
+        result = await self._push_to_flow2api(token_to_push, flow2api_url, connection_token)
 
         if result["success"]:
             success_result = f"success: {result.get('action', 'synced')}"
