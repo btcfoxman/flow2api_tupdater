@@ -7,7 +7,7 @@ import base64
 import json
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from playwright.async_api import BrowserContext, async_playwright
 
@@ -131,7 +131,10 @@ class GeminiCookieBridge:
         if active_profile_id == profile_id:
             active_context = getattr(browser_manager, "_active_context", None)
             if active_context is not None:
-                return await self._read_cookie_pair_from_context(active_context)
+                await self._refresh_google_sessions(active_context)
+                return await self._read_cookie_pair_from_context(
+                    active_context, profile_name=str(profile.get("name") or "")
+                )
 
         profile_dir = _resolve_profile_dir(profile_id)
         if not os.path.exists(profile_dir):
@@ -154,14 +157,10 @@ class GeminiCookieBridge:
                 ignore_default_args=["--enable-automation"],
             )
 
-            page = context.pages[0] if context.pages else await context.new_page()
-            try:
-                await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=60000)
-            except Exception:
-                # Cookie may still be available even if navigation fails.
-                pass
-
-            return await self._read_cookie_pair_from_context(context)
+            await self._refresh_google_sessions(context)
+            return await self._read_cookie_pair_from_context(
+                context, profile_name=str(profile.get("name") or "")
+            )
         finally:
             if context is not None:
                 try:
@@ -173,25 +172,45 @@ class GeminiCookieBridge:
             except Exception:
                 pass
 
-    async def _read_cookie_pair_from_context(self, context: BrowserContext) -> Dict[str, str]:
-        cookie_sources = [
-            "https://labs.google",
-            "https://accounts.google.com",
-            "https://google.com",
-        ]
+    async def _refresh_google_sessions(self, context: BrowserContext) -> None:
+        page = context.pages[0] if context.pages else await context.new_page()
         try:
-            cookies = await context.cookies(cookie_sources)
+            await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=45000)
         except Exception:
-            cookies = await context.cookies()
+            # Best effort only.
+            pass
+
+    async def _read_cookie_pair_from_context(
+        self, context: BrowserContext, profile_name: str = ""
+    ) -> Dict[str, str]:
+        cookies: List[Dict[str, Any]] = []
+        try:
+            cookies.extend(await context.cookies([config.labs_url]))
+        except Exception:
+            pass
+        try:
+            cookies.extend(await context.cookies())
+        except Exception:
+            pass
 
         cookie_map: Dict[str, str] = {}
+        secure_cookie_names: set[str] = set()
         for cookie in cookies:
             name = str(cookie.get("name") or "")
+            if name.startswith("__Secure-"):
+                secure_cookie_names.add(name)
             if name in {"__Secure-1PSID", "__Secure-1PSIDTS"}:
                 cookie_map[name] = str(cookie.get("value") or "")
+
+        if "__Secure-1PSID" not in cookie_map or "__Secure-1PSIDTS" not in cookie_map:
+            sample_names = ", ".join(sorted(secure_cookie_names)[:10]) or "none"
+            logger.warning(
+                "[%s] Gemini cookies not ready. Found secure cookies: %s",
+                profile_name or "unknown-profile",
+                sample_names,
+            )
 
         return cookie_map
 
 
 gemini_cookie_bridge = GeminiCookieBridge()
-
