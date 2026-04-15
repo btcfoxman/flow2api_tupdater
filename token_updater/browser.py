@@ -1109,7 +1109,7 @@ class BrowserManager:
                 self._active_profile_id = profile_id
 
                 page = self._active_context.pages[0] if self._active_context.pages else await self._active_context.new_page()
-                await page.goto(config.labs_url, wait_until="domcontentloaded")
+                await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=90000)
 
                 logger.info(f"[{profile['name']}] 浏览器已启动，请通过 VNC 登录")
                 return True
