@@ -1,38 +1,55 @@
-# Flow2API Token Updater v3.3
+# Flow2API Token Updater v3.4
 
 Flow2API Token Updater 是一个轻量级的多账号令牌刷新工具。
-它使用 Playwright 的持久化浏览器 Profile 来保持 Google Labs 登录会话存活，
-在需要时提取会话令牌（session token），并将其推送到 Flow2API。
+支持两种刷新模式：**协议刷新**（纯 HTTP，无需浏览器）和**浏览器刷新**（Playwright 持久化上下文）。
+优先使用协议刷新，失败时自动回退浏览器模式。
 
 当前版本重点解决三件事：
 
 - 多账号管理
 - 单账号级别的 Flow2API 目标覆盖
+- 协议刷新 + 浏览器自动登录
 - 带图表和近期活动的实时仪表盘（Dashboard）
 
 ## 亮点
 
+- **协议刷新**：无需浏览器，纯 HTTP 请求刷新 session token（由 [Hooper](https://github.com/Hooper27) 提供技术方案）
+- 智能回退：协议刷新失败时自动回退到浏览器模式，浏览器刷新失败则清除过期 cookies
+- 浏览器自动登录：支持自动填写账号密码登录（多语言：中/英/日/韩/西/法/德/葡/俄）
 - 运行时轻量：只有在需要登录时才会启动 VNC / Xvfb / noVNC
+- Cookie 导入：支持导入 Google cookies 进行协议登录，或导入 labs.google cookies 恢复会话
+- 自动转化：浏览器登录成功后自动提取 Google cookies，后续同步自动转为协议刷新
 - 智能同步：按最终生效的 Flow2API 地址和令牌分组
 - 单账号覆盖：每个 Profile 都可以覆盖目标地址和连接令牌
 - 代理支持：每个 Profile 都可以使用独立代理
-- Cookie 导入：无需打开浏览器也能恢复登录状态
 - 实时仪表盘：优先使用 SSE，失败时自动回退到轮询
 - 图表范围切换：6 小时 / 24 小时 / 72 小时 / 7 天
 - 内置分析：同步活动、失败原因、目标实例分布
 
 ## 工作原理
 
-1. 每个账号都作为独立的 Profile 保存。
-2. 浏览器状态持久化存储在 `profiles/` 中。
-3. 同步时，最终生效目标按以下顺序计算：
-   - `profile.flow2api_url`，否则使用全局 `FLOW2API_URL`
-   - `profile.connection_token_override`，否则使用全局 `CONNECTION_TOKEN`
-4. 所有启用中的 Profile 会按“最终生效目标地址 + 最终生效令牌”分组。
-5. 每个分组会先调用 Flow2API 的 `check-tokens` 接口。
-6. 只有确实需要刷新的 Profile 才会执行同步。
-7. 如果目标端检查失败，该分组会回退到强制同步。
-8. 每次同步结果都会写入历史记录，供仪表盘展示。
+### 刷新策略
+
+1. 每个账号维护一组 Google cookies（`google_cookies` 字段）。
+2. 同步时，如果 `google_cookies` 存在，优先使用**协议刷新**：
+   - 用 curl_cffi 模拟 Chrome TLS 指纹，通过 Google OAuth 流程获取 labs.google session token
+   - 无需启动浏览器，速度快、资源占用低
+3. 协议刷新失败时，自动清除过期 cookies 并回退到**浏览器刷新**：
+   - 启动 Playwright headless 浏览器，从持久化 Profile 中恢复会话
+   - 成功后自动提取新的 Google cookies，下次同步恢复协议刷新
+4. 同步结果分组逻辑：
+   - 按”最终生效目标地址 + 最终生效令牌”分组
+   - 先调用 Flow2API 的 `check-tokens` 接口，只刷新需要刷新的 Profile
+   - 如果目标端检查失败，该分组回退到强制同步
+
+### 登录方式
+
+| 方式 | 说明 | 自动提取 cookies |
+|------|------|------------------|
+| VNC 手动登录 | 通过 noVNC 完成 Google 登录 | 是 |
+| 浏览器自动登录 | 配置账号密码后自动登录 | 是 |
+| 协议 Cookie 导入 | 导入 Google cookies 直接协议登录 | 直接使用 |
+| Labs Cookie 导入 | 导入 labs.google 域名 cookies 恢复会话 | 首次同步时提取 |
 
 ## 快速开始
 
@@ -76,12 +93,16 @@ docker compose up -d --build
 7. 手动执行一次同步，确认账号可用。
 8. 后续刷新交给定时任务处理。
 
-### 流程 B：导入 Cookie
+### 流程 B：协议 Cookie 导入（推荐）
 
-1. 创建一个 Profile。
-2. 打开 `Cookie` 对话框。
-3. 粘贴 `labs.google` 域名下的 Cookie JSON。
-4. 执行 `Check Login` 或 `Sync`，验证导入后的登录状态。
+1. 使用浏览器插件（如 Cookie Editor）导出以下两个域名的 cookies：
+   - `.google.com` 域名下的所有 cookies
+   - `accounts.google.com` 域名下的所有 cookies
+2. 创建一个 Profile。
+3. 点击 `协议登录`，粘贴合并后的 cookies JSON。
+4. 系统自动通过 OAuth 流程获取 session token，后续同步自动走协议刷新。
+
+> 提示：两个域名的 cookies 需要合并为一个 JSON 数组导入。
 
 ### 多实例 Flow2API 配置
 
@@ -171,6 +192,7 @@ docker compose up -d --build
 - `POST /api/profiles/{id}/close`
 - `POST /api/profiles/{id}/check-login`
 - `POST /api/profiles/{id}/import-cookies`
+- `GET /api/profiles/{id}/export-cookies?kind=session|google`（默认导出 `google`）
 - `POST /api/profiles/{id}/extract`
 - `POST /api/profiles/{id}/sync`
 - `POST /api/sync-all`
@@ -185,6 +207,25 @@ docker compose up -d --build
 - `GET /health`
 
 ## 升级说明
+
+### 升级到 v3.4
+
+v3.4 新增了协议刷新能力：
+
+- 协议登录（Cookie 导入 → OAuth 流程 → session token）
+- 浏览器登录后自动提取 Google cookies，后续转协议刷新
+- 协议刷新失败自动回退浏览器
+- 浏览器自动登录多语言支持（日/韩/西/法/德/葡/俄）
+- `login_method` 字段标识登录方式
+- UI 全面重构
+
+升级步骤：
+
+1. 备份 `data/` 和 `profiles/`。
+2. 拉取最新代码。
+3. 重新构建并重启容器（`docker compose up -d --build`）。
+4. 应用会自动创建新字段（`google_cookies`、`login_method`）。
+5. 已登录的账号下次同步时会自动提取 Google cookies，无需重新登录。
 
 ### 升级到 v3.3
 

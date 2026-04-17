@@ -18,6 +18,8 @@ from .logger import logger
 class TokenSyncer:
     """Token 同步器。"""
 
+    BROWSER_EXTRACT_TIMEOUT_SECONDS = 300
+
     def __init__(self):
         self._total_sync_count = 0
         self._total_error_count = 0
@@ -27,6 +29,9 @@ class TokenSyncer:
     def _normalize_email(self, email: Optional[str]) -> str:
         return (email or "").strip().lower()
 
+    def is_syncing(self) -> bool:
+        return self._sync_lock.locked()
+
     def _parse_time(self, value: Any) -> Optional[datetime]:
         if not value or not isinstance(value, str):
             return None
@@ -34,6 +39,39 @@ class TokenSyncer:
             return datetime.fromisoformat(value)
         except ValueError:
             return None
+
+    async def _extract_token_with_timeout(self, profile: Dict[str, Any]) -> Optional[str]:
+        profile_id = int(profile["id"])
+        profile_name = str(profile.get("name") or profile_id)
+        try:
+            return await asyncio.wait_for(
+                browser_manager.extract_token(profile_id),
+                timeout=self.BROWSER_EXTRACT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"[{profile_name}] Browser token extraction timed out after {self.BROWSER_EXTRACT_TIMEOUT_SECONDS} seconds"
+            )
+            await browser_manager.abort_active_browser(profile_id)
+            return None
+
+    async def _build_gemini_token_with_timeout(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        profile_id = int(profile["id"])
+        profile_name = str(profile.get("name") or profile_id)
+        try:
+            return await asyncio.wait_for(
+                gemini_cookie_bridge.build_plugin_session_token(profile),
+                timeout=self.BROWSER_EXTRACT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"[{profile_name}] Browser Gemini extraction timed out after {self.BROWSER_EXTRACT_TIMEOUT_SECONDS} seconds"
+            )
+            await browser_manager.abort_active_browser(profile_id)
+            return {
+                "success": False,
+                "error": f"browser extraction timeout after {self.BROWSER_EXTRACT_TIMEOUT_SECONDS} seconds",
+            }
 
     def _is_sync_overdue(self, profile: Dict[str, Any], now: Optional[datetime] = None) -> bool:
         """超过刷新间隔或从未同步过的 Profile，仍然需要兜底同步。"""
@@ -84,6 +122,7 @@ class TokenSyncer:
             if any(
                 token in remark
                 for token in (
+                    "gemini2api",
                     "extract=gemini_cookies",
                     "mode=gemini_cookies",
                     "gemini-fastapi",
@@ -238,11 +277,13 @@ class TokenSyncer:
         logger.info(f"[{profile['name']}] 开始同步 -> {flow2api_url}")
         extract_mode = self._resolve_extract_mode(profile)
         token_to_push = ""
+        token_source = ""
 
         if extract_mode == "gemini_cookies":
-            gemini_result = await gemini_cookie_bridge.build_plugin_session_token(profile)
+            gemini_result = await self._build_gemini_token_with_timeout(profile)
+            token_source = "browser"
             if not gemini_result["success"]:
-                error = str(gemini_result.get("error") or "无法提取 Gemini cookies")
+                error = str(gemini_result.get("error") or "Unable to extract Gemini cookies")
                 await self._update_profile_check_result(
                     profile_id,
                     last_sync_time=datetime.now().isoformat(),
@@ -256,27 +297,62 @@ class TokenSyncer:
 
             token_to_push = str(gemini_result["session_token"])
             logger.info(
-                f"[{profile['name']}] 提取到 Gemini cookies 并编码为 gcu payload (client_id={gemini_result.get('client_id')})"
+                f"[{profile['name']}] Gemini cookies extracted and encoded as gcu payload (client_id={gemini_result.get('client_id')})"
             )
         else:
-            token = await browser_manager.extract_token(profile_id)
-            if not token:
-                error = "无法提取 Token，请先登录"
-                await self._update_profile_check_result(
-                    profile_id,
-                    last_sync_time=datetime.now().isoformat(),
-                    result="failed: no token",
-                    last_sync_result="failed: no token",
-                    error_count=profile.get("error_count", 0) + 1,
-                )
-                self._total_error_count += 1
-                await self._record_sync_result(profile, flow2api_url, False, message=error)
-                return {"success": False, "error": error, "target_url": flow2api_url}
+            token: Optional[str] = None
+            google_cookies = profile.get("google_cookies")
+            if google_cookies:
+                from .protocol_login import protocol_loginer
 
-            logger.info(f"[{profile['name']}] 提取到 Token: {token[:20]}...{token[-10:]}")
+                proxy_url = profile.get("proxy_url") if profile.get("proxy_enabled") else None
+                logger.info(f"[{profile['name']}] Trying protocol refresh with Google cookies...")
+                login_result = await protocol_loginer.login(
+                    google_cookies,
+                    proxy=proxy_url,
+                    email=profile.get("email"),
+                )
+                if login_result.get("success"):
+                    token = str(login_result["session_token"])
+                    token_source = "protocol"
+                    logger.info(f"[{profile['name']}] Protocol refresh succeeded")
+                else:
+                    logger.warning(
+                        f"[{profile['name']}] Protocol refresh failed: {login_result.get('error')}; falling back to browser extraction"
+                    )
+                    await profile_db.update_profile(profile_id, google_cookies=None)
+
+            if not token:
+                token = await self._extract_token_with_timeout(profile)
+                token_source = "browser"
+                if not token:
+                    error = "Unable to extract token; please log in first"
+                    await self._update_profile_check_result(
+                        profile_id,
+                        last_sync_time=datetime.now().isoformat(),
+                        result="failed: no token",
+                        last_sync_result="failed: no token",
+                        error_count=profile.get("error_count", 0) + 1,
+                    )
+                    self._total_error_count += 1
+                    await self._record_sync_result(profile, flow2api_url, False, message=error)
+                    return {"success": False, "error": error, "target_url": flow2api_url}
+
+            logger.info(f"[{profile['name']}] Extracted token: {token[:20]}...{token[-10:]}")
             token_to_push = token
 
         result = await self._push_to_flow2api(token_to_push, flow2api_url, connection_token)
+
+        if not result["success"] and extract_mode != "gemini_cookies" and token_source == "protocol":
+            logger.warning(
+                f"[{profile['name']}] Protocol-derived session push failed: {result.get('error')}; retrying with browser extraction"
+            )
+            await profile_db.update_profile(profile_id, google_cookies=None)
+            browser_token = await self._extract_token_with_timeout(profile)
+            if browser_token:
+                token_to_push = browser_token
+                token_source = "browser"
+                result = await self._push_to_flow2api(token_to_push, flow2api_url, connection_token)
 
         if result["success"]:
             success_result = f"success: {result.get('action', 'synced')}"
@@ -320,6 +396,24 @@ class TokenSyncer:
 
     async def sync_all_profiles(self, *, source: str = "manual") -> Dict[str, Any]:
         """同步所有活跃 Profile（智能模式：按目标地址分组刷新）。"""
+        if source == "scheduled" and (self.is_syncing() or execution_gate.is_busy()):
+            current = execution_gate.get_status().get("current") or {}
+            reason = "another sync is still running" if self.is_syncing() else (
+                f"execution gate is busy with {current.get('action') or 'another operation'}"
+            )
+            logger.warning(f"Scheduled sync skipped before enqueue: {reason}")
+            result = {
+                "success": True,
+                "total": 0,
+                "synced": 0,
+                "success_count": 0,
+                "error_count": 0,
+                "skipped": 0,
+                "results": [],
+                "skipped_reason": reason,
+            }
+            await dashboard_events.publish("sync_batch", result)
+            return result
         async with self._sync_lock:
             async with execution_gate.hold("sync_all", source=source):
                 logger.info("=" * 40)

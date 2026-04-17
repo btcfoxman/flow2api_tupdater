@@ -11,6 +11,7 @@ _ACTION_LABELS = {
     "close_browser": "关闭浏览器",
     "check_login": "检测登录状态",
     "import_cookies": "导入会话数据",
+    "export_cookies": "导出 Cookie",
     "extract_token": "提取会话令牌",
     "sync_profile": "同步账号",
     "sync_all": "同步全部账号",
@@ -55,6 +56,9 @@ class ExecutionGate:
             "busy": current is not None,
             "current": current,
         }
+
+    def is_busy(self) -> bool:
+        return self._lock.locked()
 
 
 execution_gate = ExecutionGate()

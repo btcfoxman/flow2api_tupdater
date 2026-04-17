@@ -59,10 +59,14 @@ class ProfileDB:
                 await db.execute("ALTER TABLE profiles ADD COLUMN flow2api_url TEXT")
             if 'connection_token_override' not in columns:
                 await db.execute("ALTER TABLE profiles ADD COLUMN connection_token_override TEXT")
+            if 'google_cookies' not in columns:
+                await db.execute("ALTER TABLE profiles ADD COLUMN google_cookies TEXT")
             if 'last_check_time' not in columns:
                 await db.execute("ALTER TABLE profiles ADD COLUMN last_check_time TEXT")
             if 'last_check_result' not in columns:
                 await db.execute("ALTER TABLE profiles ADD COLUMN last_check_result TEXT")
+            if 'login_method' not in columns:
+                await db.execute("ALTER TABLE profiles ADD COLUMN login_method TEXT")
 
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS sync_history (

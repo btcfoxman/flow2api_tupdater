@@ -14,6 +14,7 @@ from playwright.async_api import BrowserContext, async_playwright
 from .browser import BROWSER_ARGS, browser_manager
 from .config import config
 from .logger import logger
+from .protocol_login import _parse_google_cookies
 from .proxy_utils import format_proxy_for_playwright, parse_proxy
 
 EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
@@ -90,40 +91,51 @@ class GeminiCookieBridge:
     async def build_plugin_session_token(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
             cookies = await self._extract_cookie_pair(profile)
-            secure_1psid = cookies.get("__Secure-1PSID")
-            secure_1psidts = cookies.get("__Secure-1PSIDTS")
-            if not secure_1psid or not secure_1psidts:
-                return {
-                    "success": False,
-                    "error": "未提取到 __Secure-1PSID 或 __Secure-1PSIDTS，请先完成 Gemini 登录。",
-                }
+            return self._build_plugin_payload(profile, cookies)
 
-            client_id = _resolve_client_id(profile)
-            email = _resolve_identity_email(profile, client_id)
-            proxy = str(profile.get("proxy_url") or "").strip() if profile.get("proxy_enabled") else None
+    def build_plugin_session_token_from_google_cookies(
+        self,
+        profile: Dict[str, Any],
+        google_cookies_raw: str,
+    ) -> Dict[str, Any]:
+        cookies = _parse_google_cookies(google_cookies_raw)
+        return self._build_plugin_payload(profile, cookies)
 
-            payload = {
-                "client_id": client_id,
-                "email": email,
-                "secure_1psid": secure_1psid,
-                "secure_1psidts": secure_1psidts,
-                "proxy": proxy or None,
-            }
-            session_token = _encode_payload(payload)
-            logger.info(
-                "[%s] Gemini 凭据提取成功: client_id=%s, email=%s, 1psid=%s, 1psidts=%s",
-                profile.get("name"),
-                client_id,
-                email,
-                _mask(secure_1psid),
-                _mask(secure_1psidts),
-            )
+    def _build_plugin_payload(self, profile: Dict[str, Any], cookies: Dict[str, str]) -> Dict[str, Any]:
+        secure_1psid = cookies.get("__Secure-1PSID")
+        secure_1psidts = cookies.get("__Secure-1PSIDTS")
+        if not secure_1psid or not secure_1psidts:
             return {
-                "success": True,
-                "session_token": session_token,
-                "client_id": client_id,
-                "email": email,
+                "success": False,
+                "error": "Missing __Secure-1PSID or __Secure-1PSIDTS; complete Gemini login first.",
             }
+
+        client_id = _resolve_client_id(profile)
+        email = _resolve_identity_email(profile, client_id)
+        proxy = str(profile.get("proxy_url") or "").strip() if profile.get("proxy_enabled") else None
+
+        payload = {
+            "client_id": client_id,
+            "email": email,
+            "secure_1psid": secure_1psid,
+            "secure_1psidts": secure_1psidts,
+            "proxy": proxy or None,
+        }
+        session_token = _encode_payload(payload)
+        logger.info(
+            "[%s] Gemini credentials ready: client_id=%s, email=%s, 1psid=%s, 1psidts=%s",
+            profile.get("name"),
+            client_id,
+            email,
+            _mask(secure_1psid),
+            _mask(secure_1psidts),
+        )
+        return {
+            "success": True,
+            "session_token": session_token,
+            "client_id": client_id,
+            "email": email,
+        }
 
     async def _extract_cookie_pair(self, profile: Dict[str, Any]) -> Dict[str, str]:
         active_profile_id = browser_manager.get_active_profile_id()
@@ -177,7 +189,6 @@ class GeminiCookieBridge:
         try:
             await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=45000)
         except Exception:
-            # Best effort only.
             pass
 
     async def _read_cookie_pair_from_context(

@@ -1,5 +1,6 @@
 const API = "";
 const DASHBOARD_HOUR_OPTIONS = [6, 24, 72, 168];
+const DASHBOARD_VIEW_OPTIONS = ["overview", "profiles", "activity"];
 
 const state = {
     token: localStorage.getItem("t") || "",
@@ -10,6 +11,7 @@ const state = {
     pendingRefresh: false,
     operationLock: null,
     selectedHours: normalizeDashboardHours(Number(localStorage.getItem("dashboard-hours") || 24)),
+    currentView: normalizeDashboardView(localStorage.getItem("dashboard-view") || "overview"),
     stream: null,
     streamStatus: "idle",
     streamLastEventAt: 0,
@@ -29,6 +31,10 @@ document.addEventListener("DOMContentLoaded", init);
 function normalizeDashboardHours(value) {
     const hours = Number(value);
     return DASHBOARD_HOUR_OPTIONS.includes(hours) ? hours : 24;
+}
+
+function normalizeDashboardView(value) {
+    return DASHBOARD_VIEW_OPTIONS.includes(String(value)) ? String(value) : "overview";
 }
 
 function bucketHoursForRange(hours) {
@@ -221,24 +227,23 @@ function showLogin() {
     elements.loginRoot.className = "screen-center login-shell";
     elements.loginRoot.innerHTML = `
         <div class="login-card">
-            <section class="login-hero">
-                <span class="eyebrow">Flow2API 令牌更新器</span>
-                <h1 class="login-title">Flow2API 令牌更新器</h1>
-                <p class="login-subtitle">用于管理账号、同步令牌与目标配置。</p>
-            </section>
-            <section class="login-panel">
-                <div>
-                    <h2 class="panel-title">管理员登录</h2>
-                    <p class="panel-copy">输入管理员密码后进入控制台。</p>
-                </div>
+            <div class="login-icon">${renderIcon("lock")}</div>
+            <span class="login-badge">Flow2API 控制台</span>
+            <h1 class="login-title">Flow2API 控制台</h1>
+            <p class="login-subtitle">请输入管理员密码以继续。</p>
+            <form class="login-form" onsubmit="event.preventDefault(); doLogin(this.querySelector('button'))">
                 <div class="field">
                     <label for="login-password">管理员密码</label>
-                    <input id="login-password" type="password" placeholder="请输入管理员密码" onkeydown="if(event.key==='Enter'){doLogin()}">
+                    <input id="login-password" type="password" placeholder="请输入管理员密码">
                 </div>
-                <button class="btn primary" onclick="doLogin(this)">登录</button>
-            </section>
+                <button class="btn primary login-submit" type="submit">
+                    登录
+                    ${renderIcon("arrow-right")}
+                </button>
+            </form>
         </div>
     `;
+    document.getElementById("login-password")?.focus();
 }
 
 function showAppShell() {
@@ -595,6 +600,155 @@ function getStatusLabel(status) {
     return "状态";
 }
 
+const ICONS = {
+    lock: '<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V8a4 4 0 1 1 8 0v3"></path></svg>',
+    "arrow-right": '<svg viewBox="0 0 24 24"><path d="M5 12h14"></path><path d="m13 6 6 6-6 6"></path></svg>',
+    activity: '<svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"></path></svg>',
+    monitor: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8"></path><path d="M12 16v4"></path></svg>',
+    refresh: '<svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3.4-7"></path><path d="M21 3v6h-6"></path></svg>',
+    logout: '<svg viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path><path d="M10 17 15 12 10 7"></path><path d="M15 12H3"></path></svg>',
+    info: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 10v6"></path><path d="M12 7h.01"></path></svg>',
+    users: '<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"></path><circle cx="9.5" cy="7" r="3.5"></circle><path d="M20 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a3.5 3.5 0 0 1 0 6.74"></path></svg>',
+    "check-circle": '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="m8.5 12.5 2.3 2.3 4.7-5.3"></path></svg>',
+    target: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"></circle><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3"></path><path d="M12 19v3"></path><path d="M2 12h3"></path><path d="M19 12h3"></path></svg>',
+    "trending-up": '<svg viewBox="0 0 24 24"><path d="M3 17 9 11 13 15 21 7"></path><path d="M14 7h7v7"></path></svg>',
+    "trending-down": '<svg viewBox="0 0 24 24"><path d="m3 7 6 6 4-4 8 8"></path><path d="M14 17h7v-7"></path></svg>',
+    server: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect><path d="M7 7h.01"></path><path d="M7 17h.01"></path></svg>',
+    save: '<svg viewBox="0 0 24 24"><path d="M5 21h14V7l-4-4H5z"></path><path d="M9 21v-6h6v6"></path><path d="M9 3v4h4"></path></svg>',
+    upload: '<svg viewBox="0 0 24 24"><path d="M12 16V4"></path><path d="m7 9 5-5 5 5"></path><path d="M4 20h16"></path></svg>',
+    plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>',
+    play: '<svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"></path></svg>',
+    square: '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>',
+    shield: '<svg viewBox="0 0 24 24"><path d="M12 3 6 6v5c0 4.5 2.9 8.6 6 10 3.1-1.4 6-5.5 6-10V6z"></path><path d="m9.5 12 1.7 1.7 3.3-3.7"></path></svg>',
+    download: '<svg viewBox="0 0 24 24"><path d="M12 4v10"></path><path d="m7 10 5 5 5-5"></path><path d="M4 20h16"></path></svg>',
+    cookie: '<svg viewBox="0 0 24 24"><path d="M20 13.5A6.5 6.5 0 1 1 10.5 4a3.5 3.5 0 0 0 4.5 4.5 3.5 3.5 0 0 0 4.5 5Z"></path><path d="M8.5 10h.01"></path><path d="M12 14h.01"></path><path d="M15.5 11h.01"></path></svg>',
+    key: '<svg viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="3.5"></circle><path d="M11 15.5h10"></path><path d="M18 12.5v6"></path><path d="M14.5 12.5v6"></path></svg>',
+    edit: '<svg viewBox="0 0 24 24"><path d="M12 20h9"></path><path d="m16.5 3.5 4 4L8 20l-5 1 1-5z"></path></svg>',
+    trash: '<svg viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="m19 6-1 14H6L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path></svg>',
+    globe: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a15 15 0 0 1 0 18"></path><path d="M12 3a15 15 0 0 0 0 18"></path></svg>',
+    clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>',
+    "x-circle": '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="m9 9 6 6"></path><path d="m15 9-6 6"></path></svg>',
+    x: '<svg viewBox="0 0 24 24"><path d="m6 6 12 12"></path><path d="m18 6-12 12"></path></svg>',
+};
+
+function renderIcon(name, className = "ui-icon") {
+    return `<span class="${className}" aria-hidden="true">${ICONS[name] || ""}</span>`;
+}
+
+function setDashboardView(view) {
+    const nextView = normalizeDashboardView(view);
+    if (nextView === state.currentView) {
+        return;
+    }
+    state.currentView = nextView;
+    localStorage.setItem("dashboard-view", nextView);
+    if (!state.dashboard) {
+        return;
+    }
+    renderApp();
+    syncExecutionButtons();
+    updateStreamBadge();
+}
+
+function renderViewNavigation(currentView, profiles, recentActivity) {
+    const items = [
+        {key: "overview", label: "数据面板", count: null},
+        {key: "profiles", label: "账号列表", count: profiles.length},
+        {key: "activity", label: "近期动态", count: recentActivity.length},
+    ];
+
+    return `
+        <nav class="view-nav" aria-label="页面导航">
+            ${items.map((item) => `
+                <button
+                    class="view-nav-btn ${item.key === currentView ? "active" : ""}"
+                    onclick="setDashboardView('${item.key}')"
+                    type="button"
+                >
+                    <span>${escapeHtml(item.label)}</span>
+                    ${item.count === null ? "" : `<span class="view-nav-count">${escapeHtml(String(item.count))}</span>`}
+                </button>
+            `).join("")}
+        </nav>
+    `;
+}
+
+function renderOverviewPanel(summary, config, targetDistribution, selectedHours) {
+    return `
+        <section class="stats-grid">
+            ${renderMetricCard("账号总数", summary.total || 0, `${summary.active || 0} 个启用中`, "primary", "users")}
+            ${renderMetricCard("已登录", summary.logged_in || 0, `未登录 ${(summary.total || 0) - (summary.logged_in || 0)} 个`, "success", "check-circle")}
+            ${renderMetricCard("自定义目标", summary.custom_targets || 0, `令牌覆盖 ${summary.token_overrides || 0} 个`, "info", "target")}
+            ${renderMetricCard("窗口成功", summary.window_success || 0, `最近 ${selectedHours} 小时`, "success", "trending-up")}
+            ${renderMetricCard("窗口失败", summary.window_error || 0, `最近 ${selectedHours} 小时`, "danger", "trending-down")}
+            ${renderMetricCard("目标实例", targetDistribution.length || summary.target_count || summary.target_instances || 0, `代理启用 ${summary.proxy_enabled || 0} 个`, "warning", "server")}
+        </section>
+
+        <section class="section-card">
+            <div class="card-head">
+                <div>
+                    <h2 class="card-title title-with-icon">${renderIcon("target")} 默认目标配置</h2>
+                </div>
+            </div>
+            <div class="config-grid">
+                <div class="field span-2">
+                    <label for="config-url">默认 Flow2API 地址</label>
+                    <input id="config-url" value="${escapeAttr(config.flow2api_url || "")}" placeholder="http://host.docker.internal:8000">
+                </div>
+                <div class="field">
+                    <label for="config-token">默认连接令牌</label>
+                    <input id="config-token" type="password" placeholder="${escapeAttr(config.connection_token_preview || "留空不修改")}">
+                    <span class="field-hint">留空表示保持当前默认令牌不变。</span>
+                </div>
+                <div class="field">
+                    <label for="config-interval">刷新间隔（分钟）</label>
+                    <div class="inline-field-row">
+                        <input id="config-interval" type="number" min="1" max="1440" value="${escapeAttr(String(config.refresh_interval || 60))}">
+                        <button class="btn primary" onclick="saveConfig(this)">${renderIcon("save")} 保存</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+    `;
+}
+
+function renderProfilesPanel(profiles) {
+    return `
+        <section class="section-card">
+            <div class="card-head">
+                <div>
+                    <h2 class="card-title title-with-icon">${renderIcon("users")} 账号列表</h2>
+                </div>
+                <div class="button-row">
+                    <button class="btn secondary" ${getBrowserLockAttrs()} onclick="syncAll(this)">${renderIcon("refresh")} 同步全部</button>
+                    <button class="btn outline" onclick="openCredentialImportModal()">${renderIcon("upload")} 导入账号</button>
+                    <button class="btn primary" onclick="openProfileModal()">${renderIcon("plus")} 新建账号</button>
+                </div>
+            </div>
+            <div class="profiles-grid">
+                ${profiles.length ? profiles.map(renderProfileCard).join("") : `
+                    <div class="empty-state">
+                        还没有账号。先创建账号，或点击上方“导入账号”批量导入，再通过自动登录、远程登录或导入会话数据完成登录。
+                    </div>`}
+            </div>
+        </section>
+    `;
+}
+
+function renderActivityPanel(recentActivity) {
+    return `
+        <section class="activity-card">
+            <div class="card-head">
+                <div>
+                    <h2 class="card-title title-with-icon">${renderIcon("activity")} 近期动态</h2>
+                </div>
+                <span class="tag info">最近 ${Math.min(recentActivity.length, 18)} 条</span>
+            </div>
+            ${renderRecentActivity(recentActivity)}
+        </section>
+    `;
+}
+
 function renderApp() {
     const dashboard = state.dashboard;
     const summary = dashboard.summary || {};
@@ -609,91 +763,53 @@ function renderApp() {
     const vncRunning = Boolean(browser.vnc_stack_running);
     const vncEnabled = Boolean(config.enable_vnc);
     const selectedHours = normalizeDashboardHours(filters.hours || state.selectedHours);
+    const currentView = normalizeDashboardView(state.currentView);
+    const execution = getExecutionState();
+    const vncCopy = vncEnabled
+        ? `已配置凭据的账号可直接点“自动登录”；需要人工接管时点“登录”并在远程窗口完成谷歌登录。当前 ${vncRunning ? "远程登录已可用" : "远程登录会在点击登录后按需拉起"}。`
+        : "当前已禁用远程登录。已配置凭据的账号仍可尝试后台自动登录。";
+    const recentActivity = dashboard.recent_activity || [];
+
+    state.currentView = currentView;
 
     elements.appRoot.innerHTML = `
         <header class="topbar">
-            <div>
-                <span class="eyebrow">控制台 · v${escapeHtml(dashboard.version || "-")}</span>
-                <h1 class="hero-title">Flow2API 令牌更新器</h1>
-                <p class="hero-subtitle">账号管理、同步状态与目标配置。</p>
-            </div>
-            <div class="toolbar">
-                <span id="stream-status-pill" class="tag ${streamMeta.tone}">${escapeHtml(streamMeta.label)}</span>
-                ${vncEnabled ? `<button class="btn ghost" onclick="openVnc()" ${vncRunning ? "" : "disabled"}>${vncRunning ? "打开远程登录" : "远程登录未启动"}</button>` : ""}
-                <button class="btn ghost" onclick="refreshDashboardAction(this)">刷新</button>
-                <button class="btn danger" onclick="doLogout(this)">退出</button>
+            <div class="topbar-inner">
+                <div class="topbar-brand">
+                    <div class="title-with-icon">
+                        <span class="metric-icon primary">${renderIcon("activity")}</span>
+                        <div>
+                            <h1 class="hero-title">控制台 <span class="version-tag">· v${escapeHtml(dashboard.version || "-")}</span></h1>
+                            <p class="hero-subtitle">账号管理、同步状态与目标配置。</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="toolbar">
+                    <span id="stream-status-pill" class="tag ${streamMeta.tone}">${escapeHtml(streamMeta.label)}</span>
+                    ${vncEnabled ? `<button class="btn outline" onclick="openVnc()" ${vncRunning ? "" : "disabled"}>${renderIcon("monitor")} ${vncRunning ? "远程登录" : "远程未启动"}</button>` : ""}
+                    <button class="btn ghost icon-only" onclick="refreshDashboardAction(this)" title="刷新">${renderIcon("refresh")}</button>
+                    <button class="btn ghost icon-only danger-text" onclick="doLogout(this)" title="退出">${renderIcon("logout")}</button>
+                </div>
             </div>
         </header>
 
-        <div class="notice">
-            ${vncEnabled
-                ? `登录方式：创建账号或导入账号密码 → 已配置凭据可点「自动登录」→ 需要人工接管时点「登录」并在远程窗口完成谷歌登录 → 点击「关闭浏览器」保存状态。当前 ${vncRunning ? "远程登录已可用" : "远程登录暂未启动，会在点击登录后按需拉起"}。`
-                : "当前已禁用远程登录。已配置凭据的账号仍可尝试后台自动登录；如需人工接管，请将环境变量 ENABLE_VNC 设为 1 后重启容器。"}
-            <div id="stream-status-copy" class="notice-inline">${escapeHtml(streamMeta.copy)}</div>
-            <div id="execution-lock-copy" class="notice-inline">${escapeHtml(getExecutionMessage())}</div>
-        </div>
+        <main class="page-main">
+            ${renderViewNavigation(currentView, profiles, recentActivity)}
 
-        <section class="stats-grid">
-            ${renderMetricCard("账号总数", summary.total || 0, `${summary.active || 0} 个启用中`)}
-            ${renderMetricCard("已登录", summary.logged_in || 0, `未登录 ${(summary.total || 0) - (summary.logged_in || 0)} 个`, "success")}
-            ${renderMetricCard("自定义目标", summary.custom_targets || 0, `令牌覆盖 ${summary.token_overrides || 0} 个`, "info")}
-            ${renderMetricCard("窗口成功", summary.window_success || 0, `最近 ${selectedHours} 小时`, "success")}
-            ${renderMetricCard("窗口失败", summary.window_error || 0, `最近 ${selectedHours} 小时`, "danger")}
-            ${renderMetricCard("目标实例", targetDistribution.length || summary.target_count || summary.target_instances || 0, `代理启用 ${summary.proxy_enabled || 0} 个`, "primary")}
-        </section>
-
-        <section class="section-card">
-            <div class="card-head">
+            <section class="notice ${execution.busy ? "is-busy" : ""}">
+                <div class="notice-icon">${renderIcon(execution.busy ? "refresh" : "info")}</div>
                 <div>
-                    <h2 class="card-title">默认目标配置</h2>
+                    <div class="notice-title">${execution.busy ? "任务执行中" : "运行说明"}</div>
+                    <div class="notice-body-text">${escapeHtml(vncCopy)}</div>
+                    <div id="stream-status-copy" class="notice-inline">${escapeHtml(streamMeta.copy)}</div>
+                    <div id="execution-lock-copy" class="notice-inline">${escapeHtml(getExecutionMessage(execution))}</div>
                 </div>
-                <button class="btn primary" onclick="saveConfig(this)">保存默认配置</button>
-            </div>
-            <div class="config-grid">
-                <div class="field">
-                    <label for="config-url">默认 Flow2API 地址</label>
-                    <input id="config-url" value="${escapeAttr(config.flow2api_url || "")}" placeholder="http://host.docker.internal:8000">
-                </div>
-                <div class="field">
-                    <label for="config-token">默认连接令牌</label>
-                    <input id="config-token" type="password" placeholder="${escapeAttr(config.connection_token_preview || "未设置")}">
-                    <span class="field-hint">留空表示保持当前默认令牌不变。</span>
-                </div>
-                <div class="field">
-                    <label for="config-interval">刷新间隔（分钟）</label>
-                    <input id="config-interval" type="number" min="1" max="1440" value="${escapeAttr(String(config.refresh_interval || 60))}">
-                </div>
-            </div>
-        </section>
+            </section>
 
-        <section class="section-card">
-                <div class="card-head">
-                    <div>
-                    <h2 class="card-title">账号列表</h2>
-                </div>
-                <div class="button-row">
-                    <button class="btn success" ${getBrowserLockAttrs()} onclick="syncAll(this)">同步全部</button>
-                    <button class="btn ghost" onclick="openCredentialImportModal()">导入账号</button>
-                    <button class="btn primary" onclick="openProfileModal()">新建账号</button>
-                </div>
-            </div>
-            <div class="profiles-grid">
-                ${profiles.length ? profiles.map(renderProfileCard).join("") : `
-                    <div class="empty-state">
-                        还没有账号。先创建账号，或点击上方「导入账号」批量导入账号密码，再通过自动登录、远程登录或导入会话数据完成登录。
-                    </div>`}
-            </div>
-        </section>
-
-        <section class="activity-card">
-            <div class="card-head">
-                <div>
-                    <h2 class="card-title">近期动态</h2>
-                </div>
-                <span class="tag info">最近 ${Math.min((dashboard.recent_activity || []).length, 18)} 条</span>
-            </div>
-            ${renderRecentActivity(dashboard.recent_activity || [])}
-        </section>
+            ${currentView === "overview" ? renderOverviewPanel(summary, config, targetDistribution, selectedHours) : ""}
+            ${currentView === "profiles" ? renderProfilesPanel(profiles) : ""}
+            ${currentView === "activity" ? renderActivityPanel(recentActivity) : ""}
+        </main>
     `;
 }
 
@@ -707,10 +823,13 @@ function renderHourFilterButtons(options, selectedHours) {
     `;
 }
 
-function renderMetricCard(label, value, foot, tone = "") {
+function renderMetricCard(label, value, foot, tone = "", iconName = "") {
     return `
-        <article class="metric-card">
-            <div class="metric-label">${escapeHtml(label)}</div>
+        <article class="metric-card ${escapeHtml(tone || "default")}">
+            <div class="metric-head">
+                <div class="metric-label">${escapeHtml(label)}</div>
+                ${iconName ? `<span class="metric-icon ${escapeHtml(tone || "default")}">${renderIcon(iconName)}</span>` : ""}
+            </div>
             <div class="metric-value ${escapeHtml(tone)}">${escapeHtml(String(value))}</div>
             <div class="metric-foot">${escapeHtml(foot || "-")}</div>
         </article>
@@ -883,77 +1002,86 @@ function renderTargetDistribution(items) {
 }
 
 function renderProfileCard(profile) {
+    const profileId = escapeJs(String(profile.id ?? ""));
     const lastResult = String(profile.last_check_result || profile.last_sync_result || "");
     const resultStatus = getResultStatus(lastResult);
     const resultTone = getStatusTone(resultStatus);
-    const targetLabel = profile.uses_default_target ? "默认目标" : "独立目标";
+    const usesDefaultTarget = profile.uses_default_target !== false && !profile.flow2api_url;
+    const targetLabel = usesDefaultTarget ? "默认目标" : "独立目标";
     const lastProcessedAt = profile.last_check_time || profile.last_sync_time;
     const profileIdentity = String(
         profile.email
         || profile.login_account
         || (profile.is_logged_in ? "已登录 / 待识别邮箱" : "未登录 / 未识别邮箱"),
     ).trim();
+    const isBrowserActive = Boolean(profile.is_browser_active || profile.browser_running);
+    const isActive = profile.is_active !== false && profile.is_enabled !== false;
+    const hasLoginCredentials = Boolean(profile.has_login_credentials || profile.has_login_password);
+    const vncEnabled = Boolean(state.dashboard?.config?.enable_vnc);
+    const effectiveTarget = profile.effective_flow2api_url || profile.flow2api_url || state.dashboard?.config?.flow2api_url || "未配置";
+    const successCount = profile.sync_count || profile.success_count || 0;
+    const errorCount = profile.error_count || 0;
 
     return `
         <article class="profile-card">
-            <div class="profile-head">
+            <div class="profile-top">
                 <div>
                     <h3 class="profile-name">${escapeHtml(profile.name || "未命名")}</h3>
-                    <div class="profile-meta">
-                        ${escapeHtml(profileIdentity)}
-                        ${profile.remark ? ` · ${escapeHtml(profile.remark)}` : ""}
+                    <div class="profile-meta-row">
+                        <span class="truncate-text" title="${escapeAttr(profileIdentity)}">${escapeHtml(profileIdentity)}</span>
+                        <span class="profile-dot">•</span>
+                        <span class="${profile.is_logged_in ? "meta-success" : "meta-muted"}">${profile.is_logged_in ? "已登录" : "未登录"}</span>
                     </div>
+                    ${profile.remark ? `<div class="profile-meta">${escapeHtml(profile.remark)}</div>` : ""}
                 </div>
-                <span class="badge ${profile.is_browser_active ? "success" : profile.is_active ? "primary" : "danger"}">
-                    ${profile.is_browser_active ? "浏览器运行中" : profile.is_active ? "已启用" : "已停用"}
+                <span class="badge ${isBrowserActive ? "warning" : isActive ? "success" : "default"}">
+                    ${isBrowserActive ? "浏览器运行中" : isActive ? "已启用" : "已停用"}
                 </span>
             </div>
 
-            <div class="chip-row">
-                <span class="badge ${profile.is_logged_in ? "success" : "warning"}">${profile.is_logged_in ? "已登录" : "未登录"}</span>
-                <span class="badge ${resultTone}">${escapeHtml(lastResult || "暂无处理结果")}</span>
-                <span class="badge info">${escapeHtml(targetLabel)}</span>
-                ${profile.has_login_credentials ? `<span class="badge primary">已配置凭据</span>` : ""}
-                ${profile.has_connection_token_override ? `<span class="badge primary">已覆盖令牌</span>` : ""}
-                ${profile.proxy_url ? `<span class="badge primary">代理已配置</span>` : ""}
+            <div class="profile-tags">
+                <span class="badge ${profile.is_logged_in ? "success" : "default"}">${profile.is_logged_in ? "已登录" : "未登录"}</span>
+                ${profile.login_method ? `<span class="badge ${profile.login_method === "protocol" ? "info" : "primary"}">${profile.login_method === "protocol" ? "协议登录" : "浏览器登录"}</span>` : ""}
+                <span class="badge ${resultTone === "info" ? "default" : resultTone} is-truncate" title="${escapeAttr(lastResult || "暂无处理结果")}">${escapeHtml(lastResult || "暂无处理结果")}</span>
+                <span class="badge ${usesDefaultTarget ? "default" : "info"}">${escapeHtml(targetLabel)}</span>
+                ${hasLoginCredentials ? `<span class="badge primary">已配置凭据</span>` : ""}
+                ${profile.has_connection_token_override ? `<span class="badge warning">已覆盖令牌</span>` : ""}
+                ${profile.proxy_url ? `<span class="badge info">代理已配置</span>` : ""}
             </div>
 
-            <div class="detail-list">
-                <div class="detail-item">
-                    <span>目标地址</span>
-                    <span>${escapeHtml(profile.effective_flow2api_url || "未配置")}</span>
+            <div class="profile-body">
+                <div class="detail-line">
+                    ${renderIcon("globe")}
+                    <span class="truncate-text" title="${escapeAttr(effectiveTarget)}">${escapeHtml(effectiveTarget)}</span>
                 </div>
-                <div class="detail-item">
-                    <span>最近处理</span>
+                <div class="detail-line">
+                    ${renderIcon("clock")}
                     <span>${escapeHtml(formatDate(lastProcessedAt))}</span>
                 </div>
-                <div class="detail-item">
-                    <span>累计统计</span>
-                    <span>成功 ${escapeHtml(String(profile.sync_count || 0))} / 失败 ${escapeHtml(String(profile.error_count || 0))}</span>
-                </div>
-                <div class="detail-item">
-                    <span>代理</span>
-                    <span>${escapeHtml(profile.proxy_url || "未配置")}</span>
+                <div class="detail-stats">
+                    <span class="detail-stat success">${renderIcon("check-circle")} ${escapeHtml(String(successCount))}</span>
+                    <span class="detail-stat danger">${renderIcon("x-circle")} ${escapeHtml(String(errorCount))}</span>
                 </div>
             </div>
 
             <div class="profile-footer">
                 <div class="button-row wrap-row">
-                    ${!profile.is_browser_active && profile.has_login_credentials
-                        ? `<button class="btn primary small" ${getBrowserLockAttrs()} onclick="autoLogin(${profile.id}, this)">自动登录</button>`
+                    ${!isBrowserActive && hasLoginCredentials
+                        ? `<button class="btn primary small" ${getBrowserLockAttrs()} onclick="autoLogin('${profileId}', this)">${renderIcon("play")} 自动登录</button>`
                         : ""}
-                    ${state.dashboard.config.enable_vnc
-                        ? (profile.is_browser_active
-                            ? `<button class="btn warning small" ${getBrowserLockAttrs()} onclick="closeBrowser(${profile.id}, this)">关闭浏览器</button>`
-                            : `<button class="btn primary small" ${getBrowserLockAttrs()} onclick="launchBrowser(${profile.id}, this)">登录</button>`)
+                    ${vncEnabled
+                        ? (isBrowserActive
+                            ? `<button class="btn danger small" ${getBrowserLockAttrs()} onclick="closeBrowser('${profileId}', this)">${renderIcon("square")} 关闭浏览器</button>`
+                            : `<button class="btn secondary small" ${getBrowserLockAttrs()} onclick="launchBrowser('${profileId}', this)">${renderIcon("monitor")} 登录</button>`)
                         : ""}
-                    <button class="btn ghost small" ${getBrowserLockAttrs()} onclick="checkLogin(${profile.id}, this)">检测</button>
-                    <button class="btn success small" ${getBrowserLockAttrs()} onclick="syncProfile(${profile.id}, this)">同步</button>
-                    <button class="btn ghost small" onclick="openCookieModal(${profile.id})">会话数据</button>
+                    <button class="btn outline small" ${getBrowserLockAttrs()} onclick="checkLogin('${profileId}', this)">${renderIcon("shield")} 检测</button>
+                    <button class="btn outline small" ${getBrowserLockAttrs()} onclick="syncProfile('${profileId}', this)">${renderIcon("refresh")} 同步</button>
+                    <button class="btn outline small" onclick="openCookieModal('${profileId}')">${renderIcon("cookie")} 会话数据</button>
+                    <button class="btn outline small" onclick="openProtocolLoginModal('${profileId}')">${renderIcon("key")} 协议登录</button>
                 </div>
-                <div class="button-row">
-                    <button class="btn ghost small" onclick="openProfileModal(${profile.id})">编辑</button>
-                    <button class="btn danger small" ${getBrowserLockAttrs()} onclick="deleteProfile(${profile.id}, '${escapeJs(profile.name || '')}', this)">删除</button>
+                <div class="button-row end-row">
+                    <button class="btn ghost small" onclick="openProfileModal('${profileId}')">${renderIcon("edit")} 编辑</button>
+                    <button class="btn ghost small danger-text" ${getBrowserLockAttrs()} onclick="deleteProfile('${profileId}', '${escapeJs(profile.name || "")}', this)">${renderIcon("trash")} 删除</button>
                 </div>
             </div>
         </article>
@@ -969,16 +1097,18 @@ function renderRecentActivity(events) {
         <div class="activity-list">
             ${events.map((event) => `
                 <div class="activity-item">
-                    <div>
-                        <div class="split-line" style="justify-content:flex-start;gap:10px;">
-                            <strong>${escapeHtml(event.profile_name || "系统")}</strong>
-                            <span class="mini-tag ${getStatusTone(event.status)}">${escapeHtml(getStatusLabel(event.status))}</span>
-                            ${event.reason_category ? `<span class="mini-tag info">${escapeHtml(event.reason_category)}</span>` : ""}
+                    <div class="activity-main">
+                        <span class="badge ${getStatusTone(event.status)} activity-badge">${escapeHtml(getStatusLabel(event.status))}</span>
+                        <div class="activity-copy">
+                            <div class="activity-line">
+                                <strong>${escapeHtml(event.profile_name || "系统")}</strong>
+                                <span>${escapeHtml(event.message || event.action || "暂无说明")}</span>
+                                ${event.reason_category ? `<span class="mini-tag info">${escapeHtml(event.reason_category)}</span>` : ""}
+                            </div>
+                            <div class="activity-meta">${escapeHtml(event.target_label || event.target_url || "未记录目标地址")}</div>
                         </div>
-                        <div class="profile-meta">${escapeHtml(event.message || event.action || "暂无说明")}</div>
-                        <div class="profile-meta">${escapeHtml(event.target_label || event.target_url || "未记录目标地址")}</div>
                     </div>
-                    <div class="muted">${escapeHtml(formatDate(event.created_at))}</div>
+                    <div class="activity-time">${escapeHtml(formatDate(event.created_at))}</div>
                 </div>`).join("")}
         </div>
     `;
@@ -1096,20 +1226,21 @@ function renderProfileModal(profile, editing) {
     const hasOverride = Boolean(profile.connection_token_override || profile.connection_token_override_preview);
     const hasLoginCredentials = Boolean(profile.has_login_credentials || profile.has_login_password);
     showModal(`
-        <div class="modal-card">
+        <div class="modal-card modal-wide">
             <div class="modal-head">
                 <div>
                     <span class="eyebrow">${editing ? "编辑账号" : "新建账号"}</span>
-                    <h3 class="card-title">${editing ? "调整账号配置" : "添加新账号"}</h3>
+                    <h3 class="modal-title">${editing ? "编辑账号" : "新建账号"}</h3>
+                    <p class="modal-copy">${editing ? "调整账号登录、代理和目标配置。" : "创建一个新的 Flow2API 账号。"}</p>
                 </div>
-                <button class="btn ghost small" onclick="closeModal()">关闭</button>
+                <button class="btn ghost icon-only" onclick="closeModal()" title="关闭">${renderIcon("x")}</button>
             </div>
             <div class="form-grid">
-                <div class="field">
+                <div class="field span-2">
                     <label for="profile-name">账号名称</label>
                     <input id="profile-name" value="${escapeAttr(profile.name || "")}" placeholder="例如：主账号-A">
                 </div>
-                <div class="field">
+                <div class="field span-2">
                     <label for="profile-remark">备注</label>
                     <input id="profile-remark" value="${escapeAttr(profile.remark || "")}" placeholder="写点备注，后面找起来更快">
                 </div>
@@ -1122,7 +1253,7 @@ function renderProfileModal(profile, editing) {
                     <input id="profile-login-password" type="password" placeholder="${escapeAttr(hasLoginCredentials ? "已保存，留空则不修改" : "留空则不配置自动登录")}">
                     <span class="field-hint">保存后会用于账号卡片里的自动登录。</span>
                 </div>
-                <div class="field">
+                <div class="field span-2">
                     <label>启用状态</label>
                     <label class="switch">
                         <input id="profile-active" type="checkbox" ${profile.is_active === false ? "" : "checked"}>
@@ -1146,21 +1277,21 @@ function renderProfileModal(profile, editing) {
                 </div>
             </div>
             ${hasOverride ? `
-                <div class="field" style="margin-top:16px;">
+                <div class="field span-2">
                     <label class="switch">
                         <input id="profile-clear-token-override" type="checkbox">
                         <span>清空当前连接令牌覆盖，改回使用全局默认值</span>
                     </label>
                 </div>` : ""}
             ${editing && hasLoginCredentials ? `
-                <div class="field" style="margin-top:16px;">
+                <div class="field span-2">
                     <label class="switch">
                         <input id="profile-clear-login-credentials" type="checkbox">
                         <span>清空当前登录账号和登录密码，关闭自动登录</span>
                     </label>
                 </div>` : ""}
             <div class="modal-actions">
-                <button class="btn ghost" onclick="closeModal()">取消</button>
+                <button class="btn outline" onclick="closeModal()">取消</button>
                 <button class="btn primary" onclick="saveProfile(this)">${editing ? "保存变更" : "创建账号"}</button>
             </div>
         </div>
@@ -1229,18 +1360,28 @@ async function saveProfile(button) {
 function openCredentialImportModal() {
     state.modal = {type: "import-accounts"};
     showModal(`
-        <div class="modal-card">
+        <div class="modal-card modal-compact">
             <div class="modal-head">
                 <div>
                     <span class="eyebrow">导入账号密码</span>
-                    <h3 class="card-title">批量导入自动登录凭据</h3>
+                    <h3 class="modal-title">批量导入自动登录凭据</h3>
+                    <p class="modal-copy">按行粘贴账号文本，系统会自动解析并导入。</p>
                 </div>
-                <button class="btn ghost small" onclick="closeModal()">关闭</button>
+                <button class="btn ghost icon-only" onclick="closeModal()" title="关闭">${renderIcon("x")}</button>
+            </div>
+            <div class="info-panel">
+                <div class="info-panel-head">
+                    ${renderIcon("info")}
+                    <strong>支持格式</strong>
+                </div>
+                <ul class="info-list">
+                    <li>三列：名称,账号,密码，支持逗号、Tab、|、---- 分隔。</li>
+                    <li>两列：账号,密码，名称会自动使用账号。</li>
+                </ul>
             </div>
             <div class="field">
                 <label for="accounts-import-content">账号文本</label>
                 <textarea id="accounts-import-content" placeholder="名称,账号,密码&#10;备用号,foo@gmail.com,pass123&#10;&#10;也支持两列：账号,密码"></textarea>
-                <span class="field-hint">支持“名称,账号,密码”、“账号,密码”、Tab、| 或 ---- 分隔。名称重复时默认更新该账号的登录凭据。</span>
             </div>
             <div class="field">
                 <label class="switch">
@@ -1249,7 +1390,7 @@ function openCredentialImportModal() {
                 </label>
             </div>
             <div class="modal-actions">
-                <button class="btn ghost" onclick="closeModal()">取消</button>
+                <button class="btn outline" onclick="closeModal()">取消</button>
                 <button class="btn primary" onclick="submitCredentialImport(this)">开始导入</button>
             </div>
         </div>
@@ -1277,24 +1418,53 @@ async function submitCredentialImport(button) {
 }
 
 function openCookieModal(profileId) {
+    const profile = (state.dashboard?.profiles || []).find((item) => String(item.id) === String(profileId)) || {};
     state.modal = {type: "cookie", profileId};
     showModal(`
-        <div class="modal-card">
+        <div class="modal-card modal-compact">
             <div class="modal-head">
                 <div>
-                    <span class="eyebrow">导入会话数据</span>
-                    <h3 class="card-title">快速恢复登录态</h3>
+                    <span class="eyebrow">会话数据管理</span>
+                    <h3 class="modal-title">导入或导出当前登录态</h3>
+                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 导入 Cookie JSON 后，系统会写入持久化浏览器资料并自动刷新 session。也可以直接导出当前账号的 labs.google Cookie 作为备份。</p>
                 </div>
-                <button class="btn ghost small" onclick="closeModal()">关闭</button>
+                <button class="btn ghost icon-only" onclick="closeModal()" title="关闭">${renderIcon("x")}</button>
             </div>
             <div class="field">
                 <label for="cookie-json">会话数据文本</label>
                 <textarea id="cookie-json" placeholder='[{"name":"...","value":"...","domain":".labs.google","path":"/","secure":true}]'></textarea>
-                <span class="field-hint">导入成功后，系统会把会话数据写入该账号的持久化浏览器资料。</span>
             </div>
             <div class="modal-actions">
-                <button class="btn ghost" onclick="closeModal()">取消</button>
+                <button class="btn outline" onclick="closeModal()">取消</button>
+                <button class="btn secondary" ${getBrowserLockAttrs()} onclick="exportCookies(this, 'session')">${renderIcon("download")} 导出当前会话</button>
                 <button class="btn primary" ${getBrowserLockAttrs()} onclick="submitCookies(this)">导入会话数据</button>
+            </div>
+        </div>
+    `);
+}
+
+function openProtocolLoginModal(profileId) {
+    const profile = (state.dashboard?.profiles || []).find((item) => String(item.id) === String(profileId)) || {};
+    state.modal = {type: "protocol-login", profileId};
+    showModal(`
+        <div class="modal-card modal-compact">
+            <div class="modal-head">
+                <div>
+                    <span class="eyebrow">协议 Cookie 管理</span>
+                    <h3 class="modal-title">导入或导出 Google Cookies</h3>
+                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 执行纯 HTTP 登录，无需启动浏览器。也可以导出当前账号已保存的 Google Cookies 进行备份或迁移。</p>
+                </div>
+                <button class="btn ghost icon-only" onclick="closeModal()" title="关闭">${renderIcon("x")}</button>
+            </div>
+            <div class="field">
+                <label for="google-cookies">Google Cookies</label>
+                <textarea id="google-cookies" placeholder='粘贴 Google 账号的 cookies，支持以下格式：&#10;&#10;JSON: [{"name":"SID","value":"xxx"}, ...]&#10;纯文本: SID=xxx; HSID=xxx; SSID=xxx'></textarea>
+                <span class="field-hint">需要同时导出 <strong>.google.com</strong> 和 <strong>accounts.google.com</strong> 两个域的 cookies（含 SID/HSID/SSID/APISID/SAPISID 及 GAPS/LSID 等）。可用浏览器插件（如 EditThisCookie）分别导出两个域后合并粘贴。</span>
+            </div>
+            <div class="modal-actions">
+                <button class="btn outline" onclick="closeModal()">取消</button>
+                <button class="btn secondary" onclick="exportCookies(this, 'google')">${renderIcon("download")} 导出当前 Google Cookies</button>
+                <button class="btn primary" ${getBrowserLockAttrs()} onclick="submitProtocolLogin(this)">协议登录</button>
             </div>
         </div>
     `);
@@ -1317,6 +1487,50 @@ async function submitCookies(button) {
         closeModal(true);
         await refreshDashboard(false, true);
         toast(data.has_token ? "导入成功，已检测到会话令牌" : "已导入，但暂未检测到会话令牌", data.has_token ? "success" : "error");
+    });
+}
+
+async function exportCookies(button, kind = "google") {
+    const modal = state.modal || {};
+    const textareaId = kind === "google" ? "google-cookies" : "cookie-json";
+
+    await withOperationLock(button, "导出中...", {action: "export_cookies", label: "导出 Cookie", profile_id: modal.profileId}, async () => {
+        const data = await json(`${API}/api/profiles/${modal.profileId}/export-cookies?kind=${encodeURIComponent(kind)}`);
+        const formatted = String(data.cookies_json || "");
+        if (!formatted) {
+            throw new Error("未获取到可导出的 Cookie 内容");
+        }
+        const textarea = document.getElementById(textareaId);
+        if (textarea) {
+            textarea.value = formatted;
+        }
+        const filename = data.filename || `profile-${modal.profileId}-${kind}-cookies.json`;
+        downloadTextFile(filename, formatted);
+        const count = Number(data.cookie_count ?? data.count ?? 0);
+        const successMessage = kind === "google"
+            ? `已导出 ${count} 条 Google Cookie`
+            : (data.has_token ? `已导出 ${count} 条 Cookie，包含会话令牌` : `已导出 ${count} 条 Cookie`);
+        toast(successMessage, "success");
+    });
+}
+
+async function submitProtocolLogin(button) {
+    const modal = state.modal || {};
+    const googleCookies = (document.getElementById("google-cookies")?.value || "").trim();
+    if (!googleCookies) {
+        toast("请输入 Google Cookies", "error");
+        return;
+    }
+
+    await withOperationLock(button, "登录中...", {action: "protocol_login", label: "协议登录", profile_id: modal.profileId}, async () => {
+        const data = await json(`${API}/api/profiles/${modal.profileId}/protocol-login`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({google_cookies: googleCookies}),
+        });
+        closeModal(true);
+        await refreshDashboard(false, true);
+        toast(data.success ? "协议登录成功，已获取会话令牌" : (data.error || "协议登录失败"), data.success ? "success" : "error");
     });
 }
 
@@ -1523,6 +1737,18 @@ function delay(ms) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function downloadTextFile(filename, content) {
+    const blob = new Blob([content], {type: "application/json;charset=utf-8"});
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function formatDate(value) {
     if (!value) {
         return "暂无记录";
@@ -1559,6 +1785,7 @@ function escapeJs(value) {
 window.doLogin = doLogin;
 window.doLogout = doLogout;
 window.refreshDashboardAction = refreshDashboardAction;
+window.setDashboardView = setDashboardView;
 window.setChartRange = setChartRange;
 window.saveConfig = saveConfig;
 window.openProfileModal = openProfileModal;
@@ -1567,7 +1794,10 @@ window.closeModal = closeModal;
 window.openCredentialImportModal = openCredentialImportModal;
 window.submitCredentialImport = submitCredentialImport;
 window.openCookieModal = openCookieModal;
+window.openProtocolLoginModal = openProtocolLoginModal;
 window.submitCookies = submitCookies;
+window.exportCookies = exportCookies;
+window.submitProtocolLogin = submitProtocolLogin;
 window.syncAll = syncAll;
 window.syncProfile = syncProfile;
 window.checkLogin = checkLogin;

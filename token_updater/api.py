@@ -541,9 +541,91 @@ class ImportCookiesRequest(BaseModel):
     cookies_json: str
 
 
+class ProtocolLoginRequest(BaseModel):
+    google_cookies: str
+
+
 class ImportAccountsRequest(BaseModel):
     content: str
     update_existing: bool = True
+
+
+def _normalize_cookie_export_kind(kind: str | None) -> str:
+    normalized = str(kind or "google").strip().lower()
+    if normalized in {"session", "labs"}:
+        return "session"
+    if normalized in {"google", "protocol"}:
+        return "google"
+    raise HTTPException(400, "Cookie 导出类型仅支持 session / google")
+
+
+def _build_cookie_export_filename(profile_id: int, kind: str) -> str:
+    return f"profile-{profile_id}-{kind}-cookies.json"
+
+
+def _parse_google_cookie_export(raw: str) -> List[Dict[str, Any]]:
+    import json as _json
+
+    text = (raw or "").strip()
+    if not text:
+        return []
+
+    try:
+        data = _json.loads(text)
+    except (_json.JSONDecodeError, ValueError):
+        data = None
+
+    cookies: List[Dict[str, Any]] = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and item.get("name") and item.get("value") is not None:
+                cookies.append(dict(item))
+        return cookies
+
+    if isinstance(data, dict):
+        if data.get("name") and data.get("value") is not None:
+            return [dict(data)]
+
+        cookie_list = data.get("cookies")
+        if isinstance(cookie_list, list):
+            for item in cookie_list:
+                if isinstance(item, dict) and item.get("name") and item.get("value") is not None:
+                    cookies.append(dict(item))
+            return cookies
+
+        for name, value in data.items():
+            if isinstance(value, str) and value:
+                cookies.append({"name": str(name), "value": value})
+        return cookies
+
+    from .protocol_login import _parse_google_cookies
+
+    parsed = _parse_google_cookies(text)
+    return [{"name": name, "value": value} for name, value in parsed.items()]
+
+
+def _build_google_cookie_export(profile: Dict[str, Any]) -> Dict[str, Any]:
+    import json as _json
+
+    raw = (profile.get("google_cookies") or "").strip()
+    if not raw:
+        raise HTTPException(404, "当前账号没有可导出的 Google Cookies")
+
+    cookies = _parse_google_cookie_export(raw)
+    if not cookies:
+        raise HTTPException(400, "当前账号保存的 Google Cookies 无法解析")
+
+    return {
+        "success": True,
+        "profile_id": profile["id"],
+        "profile_name": profile.get("name") or "",
+        "kind": "google",
+        "source": "database",
+        "cookie_count": len(cookies),
+        "cookies": cookies,
+        "cookies_json": _json.dumps(cookies, ensure_ascii=False, indent=2),
+        "filename": _build_cookie_export_filename(profile["id"], "google"),
+    }
 
 
 async def verify_session(authorization: str = Header(None)):
@@ -856,6 +938,79 @@ async def import_cookies(profile_id: int, request: ImportCookiesRequest, token: 
     if not result.get("success"):
         raise HTTPException(400, result.get("error") or "导入失败")
     await dashboard_events.publish("cookies_imported", {"profile_id": profile_id})
+    return result
+
+
+@app.get("/api/profiles/{profile_id}/export-cookies")
+async def export_cookies(
+    profile_id: int,
+    kind: str = Query("google", description="session|google，默认 google"),
+    token: str = Depends(verify_session),
+):
+    profile = await profile_db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(404, "不存在")
+
+    export_kind = _normalize_cookie_export_kind(kind)
+    if export_kind == "google":
+        return _build_google_cookie_export(profile)
+
+    async with execution_gate.hold(
+        "export_cookies",
+        profile_id=profile_id,
+        profile_name=profile.get("name", ""),
+    ):
+        result = await browser_manager.export_cookies(profile_id)
+    if not result.get("success"):
+        error = result.get("error") or "导出失败"
+        status_code = 404 if any(marker in error for marker in ("没有", "无持久化数据", "不存在", "未找到")) else 400
+        raise HTTPException(status_code, error)
+    result["filename"] = _build_cookie_export_filename(profile_id, "session")
+    return result
+
+
+@app.post("/api/profiles/{profile_id}/protocol-login")
+async def protocol_login(profile_id: int, request: ProtocolLoginRequest, token: str = Depends(verify_session)):
+    from .protocol_login import protocol_loginer
+
+    profile = await profile_db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(404, "不存在")
+
+    google_cookies = (request.google_cookies or "").strip()
+    if not google_cookies:
+        raise HTTPException(400, "Google Cookies 不能为空")
+
+    async with execution_gate.hold(
+        "protocol_login",
+        profile_id=profile_id,
+        profile_name=profile.get("name", ""),
+    ):
+        proxy_url = profile.get("proxy_url") if profile.get("proxy_enabled") else None
+        result = await protocol_loginer.login(google_cookies, proxy=proxy_url, email=profile.get("email"))
+
+    if result.get("success") and result.get("session_token"):
+        # 存储 Google cookies 并设置登录模式为协议
+        await profile_db.update_profile(profile_id, google_cookies=google_cookies, login_method="protocol", is_logged_in=1)
+        # 将 session token 写入 profile 的浏览器数据
+        import json as _json
+        session_cookie_json = _json.dumps([{
+            "name": config.session_cookie_name,
+            "value": result["session_token"],
+            "domain": ".labs.google",
+            "path": "/",
+            "secure": True,
+            "httpOnly": True,
+            "sameSite": "Lax",
+        }])
+        await browser_manager.import_cookies(profile_id, session_cookie_json)
+
+    await dashboard_events.publish(
+        "protocol_login",
+        {"profile_id": profile_id, "success": bool(result.get("success"))},
+    )
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error") or "协议登录失败")
     return result
 
 
