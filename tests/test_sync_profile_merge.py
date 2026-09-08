@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from token_updater.updater import TokenSyncer
+from token_updater.config import config
 
 
 class TokenSyncerMergeTests(unittest.IsolatedAsyncioTestCase):
@@ -107,6 +108,7 @@ class TokenSyncerMergeTests(unittest.IsolatedAsyncioTestCase):
         from_browser_profile.assert_awaited_once_with(profile)
         push_to_flow2api.assert_not_awaited()
 
+    @patch.object(config, "protocol_refresh_enabled", True)
     async def test_protocol_mode_retries_with_browser_when_protocol_payload_push_fails(self):
         syncer = TokenSyncer()
         profile = {
@@ -151,6 +153,7 @@ class TokenSyncerMergeTests(unittest.IsolatedAsyncioTestCase):
         update_profile.assert_any_await(13, google_cookies=None)
         self.assertEqual(push_to_flow2api.await_count, 2)
 
+    @patch.object(config, "protocol_refresh_enabled", True)
     async def test_protocol_refresh_uses_google_cookies_before_browser_fallback(self):
         syncer = TokenSyncer()
         profile = {
@@ -192,6 +195,7 @@ class TokenSyncerMergeTests(unittest.IsolatedAsyncioTestCase):
         extract_token.assert_not_awaited()
         push_to_flow2api.assert_awaited_once_with("session-from-protocol", "http://example.com", "token-2")
 
+    @patch.object(config, "protocol_refresh_enabled", True)
     async def test_protocol_refresh_falls_back_to_browser_and_clears_stale_google_cookies(self):
         syncer = TokenSyncer()
         profile = {

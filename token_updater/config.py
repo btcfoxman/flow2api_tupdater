@@ -55,6 +55,8 @@ class Config(BaseModel):
     enable_vnc: bool
     profiles_dir: str = "/app/profiles"
     labs_url: str = "https://labs.google/fx/tools/flow"
+    flow_url: str = "https://flow.google.com/"
+    protocol_refresh_enabled: bool = False
     login_url: str = "https://labs.google/fx/api/auth/signin/google"
     session_cookie_name: str = "__Secure-next-auth.session-token"
     token_extract_mode: str = "session"
@@ -85,6 +87,7 @@ def _build_config() -> Config:
         refresh_interval=refresh_interval,
         enable_vnc=enable_vnc,
         token_extract_mode="session",
+        protocol_refresh_enabled=_parse_bool(_get_env("FLOW_PROTOCOL_REFRESH_ENABLED"), default=False),
         api_port=_parse_int(_get_env("API_PORT"), 8002),
         session_ttl_minutes=_parse_int(_get_env("SESSION_TTL_MINUTES"), 1440),
         config_file=config_file,

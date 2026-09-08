@@ -2,6 +2,7 @@
 import json
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urljoin
 
 from curl_cffi.requests import AsyncSession
 
@@ -25,7 +26,7 @@ def _parse_google_cookies(raw: str) -> Dict[str, str]:
         if isinstance(data, list):
             result = {}
             for item in data:
-                if isinstance(item, dict):
+                if isinstance(item, dict) and item.get("domain", ".google.com").lstrip(".") in {"google.com", "accounts.google.com"}:
                     name = item.get("name", "")
                     value = item.get("value", "")
                     if name and value:
@@ -36,7 +37,7 @@ def _parse_google_cookies(raw: str) -> Dict[str, str]:
             if isinstance(cookies_list, list):
                 result = {}
                 for item in cookies_list:
-                    if isinstance(item, dict):
+                    if isinstance(item, dict) and item.get("domain", ".google.com").lstrip(".") in {"google.com", "accounts.google.com"}:
                         name = item.get("name", "")
                         value = item.get("value", "")
                         if name and value:
@@ -228,6 +229,8 @@ class ProtocolLogin:
                 current_url = redirect_url
 
                 for i in range(10):
+                    if urlsplit(current_url).scheme != "https" or urlsplit(current_url).hostname != "accounts.google.com":
+                        return {"success": False, "error": "Unexpected Google OAuth redirect host"}
                     resp = await s.get(
                         current_url,
                         headers={
@@ -239,14 +242,14 @@ class ProtocolLogin:
                     location = resp.headers.get("location")
 
                     # 检查是否有 callback URL
-                    check_url = location or ""
-                    if "labs.google/fx/api/auth/callback/google" in check_url:
+                    check_url = urljoin(current_url, location) if location else ""
+                    if urlsplit(check_url).hostname == "labs.google" and urlsplit(check_url).path == "/fx/api/auth/callback/google":
                         callback_url = check_url
                         break
 
                     if location:
-                        logger.info(f"[协议登录] 重定向到: {location[:100]}...")
-                        current_url = location
+                        logger.info(f"[协议登录] 重定向到: {urlsplit(check_url).hostname}")
+                        current_url = check_url
                         continue
 
                     # 没有 Location 头，尝试从 HTML 提取跳转
@@ -262,8 +265,8 @@ class ProtocolLogin:
                             # 相对路径补全为绝对 URL
                             if html_redirect.startswith("/"):
                                 html_redirect = urljoin(current_url, html_redirect)
-                            logger.info(f"[协议登录] 从 HTML 提取到跳转: {html_redirect[:100]}...")
-                            if "labs.google/fx/api/auth/callback/google" in html_redirect:
+                            logger.info(f"[协议登录] 从 HTML 提取到跳转: {urlsplit(html_redirect).hostname}")
+                            if urlsplit(html_redirect).hostname == "labs.google" and urlsplit(html_redirect).path == "/fx/api/auth/callback/google":
                                 callback_url = html_redirect
                                 break
                             current_url = html_redirect
@@ -276,6 +279,8 @@ class ProtocolLogin:
 
                 # 步骤4：访问 callback 换取 session cookie
                 logger.info("[协议登录] 交换 auth code 换取 session...")
+                if urlsplit(callback_url).scheme != "https" or urlsplit(callback_url).hostname != "labs.google":
+                    return {"success": False, "error": "Unexpected OAuth callback host"}
                 resp = await s.get(
                     callback_url,
                     headers={
@@ -295,6 +300,9 @@ class ProtocolLogin:
                     if not location or resp.status_code not in (301, 302, 303, 307, 308):
                         break
                     _merge_cookies(labs_cookies, resp.headers)
+                    location = urljoin(callback_url, location)
+                    if urlsplit(location).scheme != "https" or urlsplit(location).hostname != "labs.google":
+                        break
                     resp = await s.get(
                         location,
                         headers={"Cookie": _build_cookie_header(labs_cookies)},

@@ -1261,7 +1261,7 @@ function renderProfileModal(profile, editing) {
                     </label>
                 </div>
                 <div class="field">
-                    <label for="profile-proxy">代理地址</label>
+                    <label for="profile-proxy">源浏览器代理地址</label>
                     <input id="profile-proxy" value="${escapeAttr(profile.proxy_url || "")}" placeholder="http://user:pass@host:port">
                     <span class="field-hint">留空表示不走代理。</span>
                 </div>
@@ -1269,6 +1269,11 @@ function renderProfileModal(profile, editing) {
                     <label for="profile-target-url">Flow2API 地址覆盖</label>
                     <input id="profile-target-url" value="${escapeAttr(profile.flow2api_url || "")}" placeholder="留空则使用全局默认地址">
                     <span class="field-hint">适合把某个账号单独推到另一套 Flow2API。</span>
+                </div>
+                <div class="field">
+                    <label for="profile-captcha-proxy">目标 Flow2API 代理地址</label>
+                    <input id="profile-captcha-proxy" value="${escapeAttr(profile.captcha_proxy_url || "")}" placeholder="留空保留目标账号已有代理">
+                    <span class="field-hint">填写目标服务器可访问、与源浏览器同出口的代理地址。</span>
                 </div>
                 <div class="field">
                     <label for="profile-target-token">连接令牌覆盖</label>
@@ -1322,6 +1327,7 @@ async function saveProfile(button) {
         is_active: isActive,
         login_account: loginAccount,
         proxy_url: proxyUrl,
+        captcha_proxy_url: (document.getElementById("profile-captcha-proxy")?.value || "").trim(),
         flow2api_url: flow2apiUrl,
     };
     if (!modal.editing || loginPassword) {

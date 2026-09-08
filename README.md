@@ -2,7 +2,8 @@
 
 Flow2API Token Updater 是一个轻量级的多账号令牌刷新工具。
 支持两种刷新模式：**协议刷新**（纯 HTTP，无需浏览器）和**浏览器刷新**（Playwright 持久化上下文）。
-优先使用协议刷新，失败时自动回退浏览器模式。
+迁移到 `flow.google.com` 后默认使用浏览器刷新，取得完整 Google/Flow Cookie 与兼容 REST 的 Labs session。
+旧的纯协议刷新仅在 `FLOW_PROTOCOL_REFRESH_ENABLED=true` 时启用，不代表已建立新站会话。
 
 当前版本重点解决三件事：
 
@@ -18,7 +19,7 @@ Flow2API Token Updater 是一个轻量级的多账号令牌刷新工具。
 - 浏览器自动登录：支持自动填写账号密码登录（多语言：中/英/日/韩/西/法/德/葡/俄）
 - 运行时轻量：只有在需要登录时才会启动 VNC / Xvfb / noVNC
 - Cookie 导入：支持导入 Google cookies 进行协议登录，或导入 labs.google cookies 恢复会话
-- 自动转化：浏览器登录成功后自动提取 Google cookies，后续同步自动转为协议刷新
+- 完整会话：浏览器登录后提取带 domain/path/expiry 的 Google/Flow cookies，同步后由目标持久化浏览器继续轮换
 - 智能同步：按最终生效的 Flow2API 地址和令牌分组
 - 单账号覆盖：每个 Profile 都可以覆盖目标地址和连接令牌
 - 代理支持：每个 Profile 都可以使用独立代理
@@ -30,19 +31,24 @@ Flow2API Token Updater 是一个轻量级的多账号令牌刷新工具。
 
 ### 刷新策略
 
-1. 每个账号维护一组 Google cookies（`google_cookies` 字段）。
-2. 同步时，如果 `google_cookies` 存在，优先使用**协议刷新**：
-   - 用 curl_cffi 模拟 Chrome TLS 指纹，通过 Google OAuth 流程获取 labs.google session token
-   - 无需启动浏览器，速度快、资源占用低
-3. 协议刷新失败时，自动清除过期 cookies 并回退到**浏览器刷新**：
-   - 启动 Playwright headless 浏览器，从持久化 Profile 中恢复会话
-   - 成功后自动提取新的 Google cookies，下次同步恢复协议刷新
+1. 每个账号维护独立持久化 Profile 和结构化 Google cookies（`google_cookies` 字段）。
+2. 默认在源 Profile 的代理下打开 Labs/Flow，获取 Labs session，并等待 Flow 主域 Cookie。
+3. 刷新后重新读取最新 Cookie 快照，再同步到目标。目标服务必须确认 Cookie 已接收且账号代理已配置，否则不报告成功。
+   - Profile 的 `proxy_url` 用于源浏览器；新增 `captcha_proxy_url` 是目标 Flow2API 可访问的同出口代理地址。
+   - `captcha_proxy_url` 留空时保留目标账号已有代理，不自动复制源服务器的 `127.0.0.1` 地址。
+   - 两台机器地址不同不代表出口不同；必须核对实际公网出口一致。
+   - 兼容旧部署时可显式启用纯协议刷新，失败仍回退浏览器；不推荐用于新站迁移验收。
 4. 同步结果分组逻辑：
    - 按”最终生效目标地址 + 最终生效令牌”分组
    - 先调用 Flow2API 的 `check-tokens` 接口，只刷新需要刷新的 Profile
    - 如果目标端检查失败，该分组回退到强制同步
 
 ### 登录方式
+
+升级顺序：先升级 Flow2API 服务端（支持 `google_cookies` 和确认字段），再升级同步器，
+在每个源 Profile 完成一次 Flow 登录并手动同步。普通列表/API 不返回原始 Google Cookie；不要将 Cookie、页面 XSRF 或签名媒体链接写入日志。
+
+接收确认只表示目标已保存配置，不保证跨机器登录可用。Google 可能存在设备/会话绑定；若目标 native Profile 查询返回 401 或跳转未登录页，需要在目标完成登录验收。不要反复重放 Cookie 或将其误判为流量 429。
 
 | 方式 | 说明 | 自动提取 cookies |
 |------|------|------------------|

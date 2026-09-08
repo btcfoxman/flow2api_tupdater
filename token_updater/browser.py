@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from datetime import datetime
 from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse
 from playwright.async_api import async_playwright, BrowserContext, Playwright
 from .config import config
 from .database import profile_db
@@ -660,7 +661,7 @@ class BrowserManager:
             login_password,
             submit_selectors=PASSWORD_SUBMIT_SELECTORS,
             submit_patterns=["下一步", "Next", "继续", "Continue", "登录", "Sign in", "次へ", "続行", "로그인", "Iniciar sesión", "Connexion", "Anmelden", "Fazer login", "Войти"],
-            success_selectors=["[href*='labs.google']", "[data-test-id='profile-menu-button']"],
+            success_selectors=["[href*='labs.google']", "[href*='flow.google.com']", "[data-test-id='profile-menu-button']"],
         ):
             return True
         return False
@@ -826,7 +827,7 @@ class BrowserManager:
 
     async def _is_labs_session_ready(self, page, body_text: str) -> bool:
         url = str(page.url or "").lower()
-        if "labs.google" not in url:
+        if urlparse(url).hostname not in {"labs.google", "flow.google.com"}:
             return False
         if "accounts.google.com" in url:
             return False
@@ -935,11 +936,11 @@ class BrowserManager:
         self,
         profile_id: int,
         context: BrowserContext,
-    ) -> None:
+    ) -> bool:
         """从浏览器上下文提取 Google cookies 并存储，用于后续协议刷新"""
         try:
             all_google_cookies = []
-            for domain in [".google.com", "accounts.google.com"]:
+            for domain in ["www.google.com", "accounts.google.com", "flow.google.com"]:
                 try:
                     cookies = await context.cookies(f"https://{domain}")
                     all_google_cookies.extend(cookies)
@@ -947,14 +948,25 @@ class BrowserManager:
                     pass
 
             if not all_google_cookies:
-                return
+                await profile_db.update_profile(profile_id, google_cookies=None)
+                return False
 
             # 转为 JSON 存储
+            all_google_cookies = list({(c["name"], c["domain"], c.get("path", "/")): c
+                                       for c in all_google_cookies
+                                       if c.get("domain", "").lstrip(".") in {"google.com", "www.google.com", "accounts.google.com", "flow.google.com"}
+                                       and not c.get("partitionKey")}.values())
             google_cookies_json = json.dumps(all_google_cookies)
+            if not any(c["domain"].lstrip(".") == "flow.google.com" and c["name"] in {"OSID", "__Secure-OSID"} for c in all_google_cookies):
+                await profile_db.update_profile(profile_id, google_cookies=None)
+                logger.warning(f"[Profile {profile_id}] Flow login cookies missing; open flow.google.com in the source browser")
+                return False
             await profile_db.update_profile(profile_id, google_cookies=google_cookies_json)
             logger.info(f"[Profile {profile_id}] 已从浏览器提取 {len(all_google_cookies)} 个 Google cookies 用于协议刷新")
+            return True
         except Exception as e:
             logger.warning(f"[Profile {profile_id}] 提取 Google cookies 失败: {e}")
+            return False
 
     def _parse_cookies_payload(self, cookies_json: str) -> List[Dict[str, Any]]:
         data = json.loads(cookies_json)
@@ -1021,15 +1033,27 @@ class BrowserManager:
             out.append(cookie)
         return out
 
+    async def _wait_for_flow_cookies(self, context: BrowserContext) -> None:
+        for _ in range(10):
+            cookies = await context.cookies(config.flow_url)
+            if any(c.get("domain", "").lstrip(".") == "flow.google.com" and c.get("name") in {"OSID", "__Secure-OSID"} for c in cookies):
+                return
+            await asyncio.sleep(0.5)
+
     async def _get_session_cookie(self, context: BrowserContext) -> Optional[str]:
         try:
             cookies = await context.cookies("https://labs.google")
         except Exception:
             cookies = await context.cookies()
 
-        for cookie in cookies:
+        scoped = [c for c in cookies if c.get("domain", "").lstrip(".") == "labs.google"]
+        for cookie in scoped:
             if cookie.get("name") == config.session_cookie_name:
                 return cookie.get("value")
+        prefix = config.session_cookie_name + "."
+        chunks = sorted((c for c in scoped if c.get("name", "").startswith(prefix) and c["name"][len(prefix):].isdigit()), key=lambda c: int(c["name"][len(prefix):]))
+        if chunks and all(c["name"] == prefix + str(i) for i, c in enumerate(chunks)):
+            return "".join(c["value"] for c in chunks)
         return None
 
     async def import_cookies(self, profile_id: int, cookies_json: str) -> Dict[str, Any]:
@@ -1262,7 +1286,7 @@ class BrowserManager:
             profile_dir = self._get_profile_dir(profile_id)
 
             # 检查是否有持久化数据
-            if not os.path.exists(profile_dir):
+            if not os.path.exists(profile_dir) and not profile.get("google_cookies"):
                 logger.warning(f"[{profile['name']}] 无持久化数据，请先登录")
                 return None
 
@@ -1281,6 +1305,8 @@ class BrowserManager:
                 proxy = await self._get_proxy(profile)
 
                 logger.info(f"[{profile['name']}] Headless 模式提取 Token...")
+                seed_cookies = not os.path.exists(profile_dir)
+                os.makedirs(profile_dir, exist_ok=True)
 
                 # Headless + 持久化上下文
                 context = await self._playwright.chromium.launch_persistent_context(
@@ -1294,6 +1320,13 @@ class BrowserManager:
                     ignore_default_args=["--enable-automation"],
                 )
 
+                if seed_cookies:
+                    try:
+                        raw = self._parse_cookies_payload(profile.get("google_cookies") or "[]")
+                        scoped = [c for c in raw if c.get("domain", "").lstrip(".") in {"google.com", "accounts.google.com", "flow.google.com", "www.google.com"} and not c.get("partitionKey")]
+                        await context.add_cookies(self._to_playwright_cookies(scoped))
+                    except (ValueError, TypeError):
+                        logger.warning("Stored cookies lack domain metadata; browser login is required")
                 token = await self._extract_from_context(profile, context)
                 return token
 
@@ -1320,6 +1353,10 @@ class BrowserManager:
             await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=60000)
 
             token = await self._settle_labs_session(profile, context, page)
+            if token and urlparse(str(page.url)).hostname != "flow.google.com":
+                await page.goto(config.flow_url, wait_until="domcontentloaded", timeout=60000)
+            if token:
+                await self._wait_for_flow_cookies(context)
             body_text = await self._safe_page_text(page)
 
             await self._persist_login_state(
@@ -1329,7 +1366,8 @@ class BrowserManager:
             )
             if token:
                 logger.info(f"[{profile['name']}] Token 提取成功")
-                await self._save_google_cookies_from_context(profile["id"], context)
+                if not await self._save_google_cookies_from_context(profile["id"], context):
+                    return None
             else:
                 logger.warning(f"[{profile['name']}] 未找到 Token，会话可能已过期")
 
@@ -1431,7 +1469,11 @@ class BrowserManager:
                 if not token:
                     return {"success": False, "error": "未获取到会话令牌，请改用手动登录"}
 
-                await self._save_google_cookies_from_context(profile_id, context)
+                if urlparse(str(page.url)).hostname != "flow.google.com":
+                    await page.goto(config.flow_url, wait_until="domcontentloaded", timeout=60000)
+                await self._wait_for_flow_cookies(context)
+                if not await self._save_google_cookies_from_context(profile_id, context):
+                    return {"success": False, "error": "Flow login cookies missing; please complete Flow login"}
 
                 return {
                     "success": True,

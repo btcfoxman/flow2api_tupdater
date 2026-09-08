@@ -1,5 +1,6 @@
 """Token sync service."""
 import asyncio
+import json
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -302,7 +303,7 @@ class TokenSyncer:
         else:
             token: Optional[str] = None
             google_cookies = profile.get("google_cookies")
-            if google_cookies:
+            if google_cookies and config.protocol_refresh_enabled:
                 from .protocol_login import protocol_loginer
 
                 proxy_url = profile.get("proxy_url") if profile.get("proxy_enabled") else None
@@ -338,10 +339,34 @@ class TokenSyncer:
                     await self._record_sync_result(profile, flow2api_url, False, message=error)
                     return {"success": False, "error": error, "target_url": flow2api_url}
 
-            logger.info(f"[{profile['name']}] Extracted token: {token[:20]}...{token[-10:]}")
+            logger.info(f"[{profile['name']}] Extracted session via {token_source}")
             token_to_push = token
 
-        result = await self._push_to_flow2api(token_to_push, flow2api_url, connection_token)
+        async def push_current_session():
+            if extract_mode == "gemini_cookies":
+                return await self._push_to_flow2api(token_to_push, flow2api_url, connection_token)
+            # Browser extraction persists rotating cookies. Reload after extraction,
+            # otherwise the stale pre-login snapshot is sent to the other server.
+            fresh_profile = await profile_db.get_profile(profile_id) or {}
+            options = {}
+            raw = fresh_profile.get("google_cookies")
+            if raw:
+                try:
+                    cookies = json.loads(raw) if isinstance(raw, str) else raw
+                except (ValueError, TypeError):
+                    cookies = None
+                if isinstance(cookies, list) and cookies:
+                    options["google_cookies"] = cookies
+            # Source localhost and destination localhost can be different machines.
+            # Only an explicit destination binding may overwrite server configuration.
+            target_proxy = str(fresh_profile.get("captcha_proxy_url") or "").strip()
+            if target_proxy:
+                options["captcha_proxy_url"] = target_proxy
+            if not config.protocol_refresh_enabled and "google_cookies" not in options:
+                return {"success": False, "error": "Flow browser cookies missing; open Flow in the source profile and sync again"}
+            return await self._push_to_flow2api(token_to_push, flow2api_url, connection_token, **options)
+
+        result = await push_current_session()
 
         if not result["success"] and extract_mode != "gemini_cookies" and token_source == "protocol":
             logger.warning(
@@ -352,7 +377,7 @@ class TokenSyncer:
             if browser_token:
                 token_to_push = browser_token
                 token_source = "browser"
-                result = await self._push_to_flow2api(token_to_push, flow2api_url, connection_token)
+                result = await push_current_session()
 
         if result["success"]:
             success_result = f"success: {result.get('action', 'synced')}"
@@ -586,6 +611,9 @@ class TokenSyncer:
         session_token: str,
         flow2api_url: str,
         connection_token: str,
+        *,
+        google_cookies: Optional[List[Dict[str, Any]]] = None,
+        captcha_proxy_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """推送到指定 Flow2API。"""
         if not connection_token:
@@ -594,12 +622,17 @@ class TokenSyncer:
             return {"success": False, "error": "未配置 Flow2API 地址"}
 
         url = f"{flow2api_url}/api/plugin/update-token"
+        payload = {"session_token": session_token}
+        if google_cookies is not None:
+            payload["google_cookies"] = google_cookies
+        if captcha_proxy_url:
+            payload["captcha_proxy_url"] = captcha_proxy_url
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.post(
                     url,
-                    json={"session_token": session_token},
+                    json=payload,
                     headers={
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {connection_token}",
@@ -616,6 +649,14 @@ class TokenSyncer:
                     }
 
                 data = response.json()
+                if data.get("success") is not True:
+                    return {"success": False, "error": "Flow2API did not acknowledge the session update"}
+                if google_cookies is not None and (data.get("cookies_updated") is not True or data.get("flow_cookies_configured") is not True):
+                    return {"success": False, "error": "Flow cookie synchronization was not confirmed; upgrade Flow2API and refresh the source profile"}
+                if google_cookies is not None and data.get("proxy_configured") is not True:
+                    return {"success": False, "error": "目标账号未绑定代理，请配置目标 Flow2API 可访问的同出口代理地址"}
+                if captcha_proxy_url and (data.get("proxy_updated") is not True or data.get("proxy_configured") is not True):
+                    return {"success": False, "error": "Flow2API did not acknowledge the destination proxy binding"}
                 message = data.get("message", "")
                 email = None
                 if " for " in message:
