@@ -2,6 +2,11 @@ on:
   push:
     branches:
       - "a-branch-that-will-never-exist-999"
+jobs:
+  disabled:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Publishing is handled by production-docker.yml"
 #name: Build and Push Docker Image
 #
 #on:
