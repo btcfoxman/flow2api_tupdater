@@ -50,6 +50,7 @@ async def test_destination_failures_are_classified_without_body_leak(status, det
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("changes,code", [({"oauth_verified": False}, "oauth_unconfirmed"),
+                                        ({"native_session_verified": False}, "native_session_unverified"),
                                         ({"account_active": False}, "account_disabled"),
                                         ({"account_active": None}, "activation_unconfirmed")])
 async def test_saved_or_unverified_is_not_recovered(changes, code):
@@ -66,7 +67,7 @@ async def test_gemini_ack_stays_compatible():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code", ["destination_auth", "independent_login", "destination_proxy", "destination_unavailable", "account_disabled", "oauth_unconfirmed"])
+@pytest.mark.parametrize("code", ["destination_auth", "independent_login", "destination_proxy", "destination_unavailable", "account_disabled", "oauth_unconfirmed", "native_session_unverified"])
 async def test_protocol_push_failure_does_not_clear_cookies_or_relogin(code):
     syncer = TokenSyncer()
     with patch.object(config, "protocol_refresh_enabled", True), \

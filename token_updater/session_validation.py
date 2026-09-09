@@ -87,9 +87,9 @@ def scoped_google_cookies(raw: Any) -> list:
 
 def validate_google_cookies(cookies: list) -> dict:
     root = any(c.get("domain") == ".google.com" and c.get("path", "/") == "/"
-               and c.get("name") in {"SID", "__Secure-1PSID", "__Secure-3PSID"} for c in cookies)
+               and c.get("name") == "SID" and c.get("value") and cookie_is_live(c) for c in cookies)
     flow = any(c.get("domain", "").lstrip(".") == "flow.google.com" and c.get("path", "/") == "/"
-               and c.get("name") in {"OSID", "__Secure-OSID"} for c in cookies)
+               and c.get("name") in {"OSID", "__Secure-OSID"} and c.get("value") and cookie_is_live(c) for c in cookies)
     if not root or not flow:
         return failure("cookies_incomplete", "Google/Flow 登录 Cookie 不完整或已过期，请在源 Profile 完成 Google 和 Flow 登录后同步")
     return {"success": True}

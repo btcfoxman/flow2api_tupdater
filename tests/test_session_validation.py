@@ -51,6 +51,11 @@ def test_zero_balance_still_proves_authentication():
     assert validate_credits(200, {"credits": 0})["success"]
 
 
+def test_secure_psid_only_snapshot_is_incomplete():
+    partial = [{**c, "name": "__Secure-1PSID"} if c["name"] == "SID" else c for c in JAR]
+    assert validate_google_cookies(partial)["error_code"] == "cookies_incomplete"
+
+
 @pytest.mark.parametrize("change", [{"domain": "google.com"}, {"value": ""}, {"path": "/other"},
     {"expires": 1}, {"expires": 0}, {"expires": "bad"}, {"partitionKey": "https://other.test"}])
 def test_incomplete_scoped_cookie_snapshot(change):

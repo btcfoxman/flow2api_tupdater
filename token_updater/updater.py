@@ -668,6 +668,9 @@ class TokenSyncer:
                 if google_cookies is not None:
                     if data.get("oauth_verified") is not True:
                         return failure("oauth_unconfirmed", "目标未确认 Labs 实际鉴权，请先升级 Flow2API；不能将已接收视为已恢复")
+                    if data.get("native_session_verified") is False:
+                        return {**failure("native_session_unverified", "会话已保存且 OAuth 有效，但目标 Flow 项目登录预检失败；不要以生成任务反复验证登录态"),
+                                "synced": True, "oauth_verified": True, "native_session_verified": False}
                     if data.get("account_active") is False:
                         return {**failure("account_disabled", "会话已保存并通过鉴权，但目标账号仍禁用；请检查目标手动禁用状态或自动启用设置"),
                                 "synced": True, "account_active": data.get("account_active"), "oauth_verified": True}
