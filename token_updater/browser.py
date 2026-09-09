@@ -940,7 +940,7 @@ class BrowserManager:
         """从浏览器上下文提取 Google cookies 并存储，用于后续协议刷新"""
         try:
             all_google_cookies = []
-            for domain in ["www.google.com", "accounts.google.com", "flow.google.com"]:
+            for domain in ["google.com", "www.google.com", "accounts.google.com", "flow.google.com"]:
                 try:
                     cookies = await context.cookies(f"https://{domain}")
                     all_google_cookies.extend(cookies)
@@ -960,6 +960,10 @@ class BrowserManager:
             if not any(c["domain"].lstrip(".") == "flow.google.com" and c["name"] in {"OSID", "__Secure-OSID"} for c in all_google_cookies):
                 await profile_db.update_profile(profile_id, google_cookies=None)
                 logger.warning(f"[Profile {profile_id}] Flow login cookies missing; open flow.google.com in the source browser")
+                return False
+            if not any(c["domain"] == ".google.com" and c["name"] in {"SID", "__Secure-1PSID", "__Secure-3PSID"} and c.get("value") for c in all_google_cookies):
+                await profile_db.update_profile(profile_id, google_cookies=None)
+                logger.warning(f"[Profile {profile_id}] Google root-domain session cookies missing; login and sync again")
                 return False
             await profile_db.update_profile(profile_id, google_cookies=google_cookies_json)
             logger.info(f"[Profile {profile_id}] 已从浏览器提取 {len(all_google_cookies)} 个 Google cookies 用于协议刷新")

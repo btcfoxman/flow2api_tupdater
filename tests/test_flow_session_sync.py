@@ -32,7 +32,7 @@ class FlowSessionSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("captcha_proxy_url", push.await_args.kwargs)
 
     async def test_transport_sends_full_jar_and_explicit_target_proxy(self):
-        response = SimpleNamespace(status_code=200, json=lambda: {"success":True,"cookies_updated":True,"flow_cookies_configured":True,"proxy_updated":True,"proxy_configured":True})
+        response = SimpleNamespace(status_code=200, json=lambda: {"success":True,"cookies_updated":True,"flow_cookies_configured":True,"google_session_cookies_configured":True,"proxy_updated":True,"proxy_configured":True})
         client = AsyncMock()
         client.__aenter__.return_value = client
         client.post.return_value = response
@@ -51,7 +51,7 @@ class FlowSessionSyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_cookie_sync_requires_destination_account_proxy(self):
         client = AsyncMock()
         client.__aenter__.return_value = client
-        client.post.return_value = SimpleNamespace(status_code=200, json=lambda: {"success":True, "cookies_updated":True, "flow_cookies_configured":True, "proxy_configured":False})
+        client.post.return_value = SimpleNamespace(status_code=200, json=lambda: {"success":True, "cookies_updated":True, "flow_cookies_configured":True, "google_session_cookies_configured":True, "proxy_configured":False})
         with patch("token_updater.updater.httpx.AsyncClient", return_value=client):
             result = await TokenSyncer()._push_to_flow2api("st", "http://server", "key", google_cookies=JAR)
         self.assertFalse(result["success"])
@@ -63,6 +63,17 @@ class FlowSessionSyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await BrowserManager()._save_google_cookies_from_context(1, context))
         self.assertEqual(len(json.loads(save.await_args.kwargs["google_cookies"])), 2)
         self.assertIn(("https://flow.google.com",), [c.args for c in context.cookies.await_args_list])
+        self.assertIn(("https://google.com",), [c.args for c in context.cookies.await_args_list])
+
+    async def test_host_only_osid_is_not_a_complete_session(self):
+        context = SimpleNamespace(cookies=AsyncMock(return_value=[JAR[1]]))
+        with patch("token_updater.browser.profile_db.update_profile", AsyncMock()) as save:
+            self.assertFalse(await BrowserManager()._save_google_cookies_from_context(1, context))
+        save.assert_awaited_with(1, google_cookies=None)
+        with patch("token_updater.updater.httpx.AsyncClient") as client:
+            result = await TokenSyncer()._push_to_flow2api("st", "http://server", "key", google_cookies=[JAR[1]])
+        self.assertFalse(result["success"])
+        client.assert_not_called()
 
     async def test_chunked_nextauth_and_redirect_readiness(self):
         manager = BrowserManager()

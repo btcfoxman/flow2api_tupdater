@@ -624,6 +624,8 @@ class TokenSyncer:
         url = f"{flow2api_url}/api/plugin/update-token"
         payload = {"session_token": session_token}
         if google_cookies is not None:
+            if not any(c.get("domain") == ".google.com" and c.get("name") in {"SID", "__Secure-1PSID", "__Secure-3PSID"} and c.get("value") for c in google_cookies):
+                return {"success": False, "error": "Google 主域登录 Cookie 不完整，请在源 Profile 登录后重新同步"}
             payload["google_cookies"] = google_cookies
         if captcha_proxy_url:
             payload["captcha_proxy_url"] = captcha_proxy_url
@@ -651,7 +653,7 @@ class TokenSyncer:
                 data = response.json()
                 if data.get("success") is not True:
                     return {"success": False, "error": "Flow2API did not acknowledge the session update"}
-                if google_cookies is not None and (data.get("cookies_updated") is not True or data.get("flow_cookies_configured") is not True):
+                if google_cookies is not None and (data.get("cookies_updated") is not True or data.get("flow_cookies_configured") is not True or data.get("google_session_cookies_configured") is not True):
                     return {"success": False, "error": "Flow cookie synchronization was not confirmed; upgrade Flow2API and refresh the source profile"}
                 if google_cookies is not None and data.get("proxy_configured") is not True:
                     return {"success": False, "error": "目标账号未绑定代理，请配置目标 Flow2API 可访问的同出口代理地址"}
