@@ -1272,7 +1272,7 @@ function renderProfileModal(profile, editing) {
                 </div>
                 <div class="field">
                     <label for="profile-captcha-proxy">目标 Flow2API 代理地址</label>
-                    <input id="profile-captcha-proxy" value="${escapeAttr(profile.captcha_proxy_url || "")}" placeholder="留空保留目标账号已有代理">
+                    <input id="profile-captcha-proxy" value="${escapeAttr(profile.captcha_proxy_url || "")}" placeholder="首次同步或授权续期时需填写目标可访问的同出口代理">
                     <span class="field-hint">填写目标服务器可访问、与源浏览器同出口的代理地址。</span>
                 </div>
                 <div class="field">
@@ -1458,14 +1458,14 @@ function openProtocolLoginModal(profileId) {
                 <div>
                     <span class="eyebrow">协议 Cookie 管理</span>
                     <h3 class="modal-title">导入或导出 Google Cookies</h3>
-                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 执行纯 HTTP 登录，无需启动浏览器。也可以导出当前账号已保存的 Google Cookies 进行备份或迁移。</p>
+                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 刷新 Labs 授权，再通过源浏览器校验完整 Flow 会话。也可以导出当前账号已保存的 Google Cookies 进行备份或迁移。</p>
                 </div>
                 <button class="btn ghost icon-only" onclick="closeModal()" title="关闭">${renderIcon("x")}</button>
             </div>
             <div class="field">
                 <label for="google-cookies">Google Cookies</label>
-                <textarea id="google-cookies" placeholder='粘贴 Google 账号的 cookies，支持以下格式：&#10;&#10;JSON: [{"name":"SID","value":"xxx"}, ...]&#10;纯文本: SID=xxx; HSID=xxx; SSID=xxx'></textarea>
-                <span class="field-hint">需要同时导出 <strong>.google.com</strong> 和 <strong>accounts.google.com</strong> 两个域的 cookies（含 SID/HSID/SSID/APISID/SAPISID 及 GAPS/LSID 等）。可用浏览器插件（如 EditThisCookie）分别导出两个域后合并粘贴。</span>
+                <textarea id="google-cookies" placeholder='粘贴保留 domain、path、expires 的 Cookie JSON 数组，包含 Google 主域登录 Cookie 和 flow.google.com 的 OSID。'></textarea>
+                <span class="field-hint">合并导出 <strong>.google.com</strong>、<strong>accounts.google.com</strong>、<strong>flow.google.com</strong> 的完整 Cookie JSON，保留域名和有效期。只有 Labs session 或旧版纯文本 Cookie 不代表 Flow 已登录；需要二次验证时请使用手动登录。</span>
             </div>
             <div class="modal-actions">
                 <button class="btn outline" onclick="closeModal()">取消</button>

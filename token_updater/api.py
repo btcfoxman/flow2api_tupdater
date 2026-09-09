@@ -1012,13 +1012,15 @@ async def protocol_login(profile_id: int, request: ProtocolLoginRequest, token: 
         profile_name=profile.get("name", ""),
     ):
         proxy_url = profile.get("proxy_url") if profile.get("proxy_enabled") else None
+        if profile.get("proxy_enabled") and not proxy_url:
+            raise HTTPException(400, "源 Profile 已启用代理但未填写地址，已停止请求以避免使用默认出口")
         result = await protocol_loginer.login(google_cookies, proxy=proxy_url, email=profile.get("email"))
 
         if result.get("success") and result.get("session_token"):
             # Keep the browser hydration inside the operation gate, including
             # Google's scoped cookies and any chunked legacy session cookie.
             import json as _json
-            seed_cookies = _google_browser_seed(google_cookies)
+            seed_cookies = _google_browser_seed(_json.dumps(result["google_cookies"]) if "google_cookies" in result else google_cookies)
             session = result["session_token"]
             chunks = [session[i:i + 3800] for i in range(0, len(session), 3800)]
             for i, chunk in enumerate(chunks):

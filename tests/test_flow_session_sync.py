@@ -32,7 +32,7 @@ class FlowSessionSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("captcha_proxy_url", push.await_args.kwargs)
 
     async def test_transport_sends_full_jar_and_explicit_target_proxy(self):
-        response = SimpleNamespace(status_code=200, json=lambda: {"success":True,"cookies_updated":True,"flow_cookies_configured":True,"google_session_cookies_configured":True,"proxy_updated":True,"proxy_configured":True})
+        response = SimpleNamespace(status_code=200, json=lambda: {"success":True,"cookies_updated":True,"flow_cookies_configured":True,"google_session_cookies_configured":True,"proxy_updated":True,"proxy_configured":True,"oauth_verified":True,"account_active":True})
         client = AsyncMock()
         client.__aenter__.return_value = client
         client.post.return_value = response
@@ -69,7 +69,7 @@ class FlowSessionSyncTests(unittest.IsolatedAsyncioTestCase):
         context = SimpleNamespace(cookies=AsyncMock(return_value=[JAR[1]]))
         with patch("token_updater.browser.profile_db.update_profile", AsyncMock()) as save:
             self.assertFalse(await BrowserManager()._save_google_cookies_from_context(1, context))
-        save.assert_awaited_with(1, google_cookies=None)
+        save.assert_not_awaited()
         with patch("token_updater.updater.httpx.AsyncClient") as client:
             result = await TokenSyncer()._push_to_flow2api("st", "http://server", "key", google_cookies=[JAR[1]])
         self.assertFalse(result["success"])

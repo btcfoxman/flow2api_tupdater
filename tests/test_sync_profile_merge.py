@@ -1,8 +1,12 @@
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from token_updater.updater import TokenSyncer
 from token_updater.config import config
+
+JAR = [{"name": "SID", "value": "root", "domain": ".google.com", "path": "/"},
+       {"name": "OSID", "value": "flow", "domain": "flow.google.com", "path": "/"}]
 
 
 class TokenSyncerMergeTests(unittest.IsolatedAsyncioTestCase):
@@ -115,7 +119,7 @@ class TokenSyncerMergeTests(unittest.IsolatedAsyncioTestCase):
             "id": 13,
             "name": "protocol-retry-profile",
             "email": "user@example.com",
-            "google_cookies": "SID=aaa; HSID=bbb",
+            "google_cookies": json.dumps(JAR),
             "proxy_enabled": 0,
             "proxy_url": "",
             "flow2api_url": "http://example.com",
@@ -137,7 +141,7 @@ class TokenSyncerMergeTests(unittest.IsolatedAsyncioTestCase):
                 syncer,
                 "_push_to_flow2api",
                 AsyncMock(side_effect=[
-                    {"success": False, "error": "invalid labs session"},
+                    {"success": False, "error": "invalid labs session", "error_code": "auth_required"},
                     {"success": True, "action": "updated", "message": ""},
                 ]),
             ) as push_to_flow2api,
@@ -150,7 +154,7 @@ class TokenSyncerMergeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         protocol_login.assert_awaited_once()
         extract_token.assert_awaited_once_with(13)
-        update_profile.assert_any_await(13, google_cookies=None)
+        self.assertFalse(any("google_cookies" in call.kwargs for call in update_profile.await_args_list))
         self.assertEqual(push_to_flow2api.await_count, 2)
 
     @patch.object(config, "protocol_refresh_enabled", True)
@@ -160,7 +164,7 @@ class TokenSyncerMergeTests(unittest.IsolatedAsyncioTestCase):
             "id": 2,
             "name": "protocol-profile",
             "email": "user@example.com",
-            "google_cookies": "SID=aaa; HSID=bbb",
+            "google_cookies": json.dumps(JAR),
             "proxy_enabled": 1,
             "proxy_url": "http://127.0.0.1:8080",
             "flow2api_url": "http://example.com",
@@ -188,21 +192,21 @@ class TokenSyncerMergeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["success"])
         protocol_login.assert_awaited_once_with(
-            "SID=aaa; HSID=bbb",
+            json.dumps(JAR),
             proxy="http://127.0.0.1:8080",
             email="user@example.com",
         )
         extract_token.assert_not_awaited()
-        push_to_flow2api.assert_awaited_once_with("session-from-protocol", "http://example.com", "token-2")
+        push_to_flow2api.assert_awaited_once_with("session-from-protocol", "http://example.com", "token-2", google_cookies=JAR)
 
     @patch.object(config, "protocol_refresh_enabled", True)
-    async def test_protocol_refresh_falls_back_to_browser_and_clears_stale_google_cookies(self):
+    async def test_protocol_refresh_falls_back_to_browser_without_erasing_google_cookies(self):
         syncer = TokenSyncer()
         profile = {
             "id": 3,
             "name": "fallback-profile",
             "email": "user@example.com",
-            "google_cookies": "SID=expired",
+            "google_cookies": json.dumps(JAR),
             "proxy_enabled": 0,
             "proxy_url": "",
             "flow2api_url": "http://example.com",
@@ -233,9 +237,9 @@ class TokenSyncerMergeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["success"])
         protocol_login.assert_awaited_once()
-        update_profile.assert_any_await(3, google_cookies=None)
+        self.assertFalse(any("google_cookies" in call.kwargs for call in update_profile.await_args_list))
         extract_token.assert_awaited_once_with(3)
-        push_to_flow2api.assert_awaited_once_with("session-from-browser", "http://example.com", "token-3")
+        push_to_flow2api.assert_awaited_once_with("session-from-browser", "http://example.com", "token-3", google_cookies=JAR)
 
 
 if __name__ == "__main__":

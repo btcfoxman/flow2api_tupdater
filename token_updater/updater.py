@@ -14,6 +14,8 @@ from .events import dashboard_events
 from .execution import execution_gate
 from .gemini_bridge import gemini_cookie_bridge
 from .logger import logger
+from .session_validation import failure, scoped_google_cookies, validate_google_cookies
+from .sync_errors import destination_error
 
 
 class TokenSyncer:
@@ -37,7 +39,8 @@ class TokenSyncer:
         if not value or not isinstance(value, str):
             return None
         try:
-            return datetime.fromisoformat(value)
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.astimezone().replace(tzinfo=None) if parsed.tzinfo is not None else parsed
         except ValueError:
             return None
 
@@ -81,6 +84,8 @@ class TokenSyncer:
             return True
 
         current_time = now or datetime.now()
+        if current_time.tzinfo is not None:
+            current_time = current_time.astimezone().replace(tzinfo=None)
         interval_minutes = max(1, int(config.refresh_interval or 60))
         return current_time - last_sync_time >= timedelta(minutes=interval_minutes)
 
@@ -226,22 +231,18 @@ class TokenSyncer:
                 )
 
                 if response.status_code != 200:
-                    detail = (response.text or "").strip()
-                    if len(detail) > 300:
-                        detail = detail[:300] + "..."
-                    return {
-                        "success": False,
-                        "error": f"HTTP {response.status_code}: {detail}",
-                    }
+                    return destination_error(response)
 
                 data = response.json()
-                tokens = data.get("tokens", [])
+                if not isinstance(data, dict) or not isinstance(data.get("tokens"), list):
+                    return failure("destination_response", "目标返回的账号状态格式无效")
+                tokens = data["tokens"]
                 return {
                     "success": True,
                     "tokens": tokens,
                 }
-        except Exception as exc:
-            return {"success": False, "error": str(exc)}
+        except Exception:
+            return failure("destination_unavailable", "目标状态查询失败，请检查服务地址、网络连接或稍后重试")
 
     async def sync_profile(self, profile_id: int, *, source: str = "manual") -> Dict[str, Any]:
         profile = await profile_db.get_profile(profile_id)
@@ -303,7 +304,8 @@ class TokenSyncer:
         else:
             token: Optional[str] = None
             google_cookies = profile.get("google_cookies")
-            if google_cookies and config.protocol_refresh_enabled:
+            if (config.protocol_refresh_enabled and validate_google_cookies(scoped_google_cookies(google_cookies))["success"]
+                    and (not profile.get("proxy_enabled") or profile.get("proxy_url"))):
                 from .protocol_login import protocol_loginer
 
                 proxy_url = profile.get("proxy_url") if profile.get("proxy_enabled") else None
@@ -317,27 +319,34 @@ class TokenSyncer:
                     token = str(login_result["session_token"])
                     token_source = "protocol"
                     logger.info(f"[{profile['name']}] Protocol refresh succeeded")
+                    refreshed = scoped_google_cookies(login_result.get("google_cookies"))
+                    if validate_google_cookies(refreshed)["success"]:
+                        await profile_db.update_profile(profile_id, google_cookies=json.dumps(refreshed))
+                    elif "google_cookies" in login_result:
+                        # A rotation/deletion made the new snapshot incomplete.
+                        # Never pair the refreshed ST with the cached old jar.
+                        token = None
                 else:
                     logger.warning(
                         f"[{profile['name']}] Protocol refresh failed: {login_result.get('error')}; falling back to browser extraction"
                     )
-                    await profile_db.update_profile(profile_id, google_cookies=None)
 
             if not token:
                 token = await self._extract_token_with_timeout(profile)
                 token_source = "browser"
                 if not token:
-                    error = "Unable to extract token; please log in first"
+                    extraction_error = browser_manager.get_session_error(profile_id)
+                    error = extraction_error["error"]
                     await self._update_profile_check_result(
                         profile_id,
                         last_sync_time=datetime.now().isoformat(),
                         result="failed: no token",
-                        last_sync_result="failed: no token",
+                        last_sync_result=f"failed: {error}",
                         error_count=profile.get("error_count", 0) + 1,
                     )
                     self._total_error_count += 1
                     await self._record_sync_result(profile, flow2api_url, False, message=error)
-                    return {"success": False, "error": error, "target_url": flow2api_url}
+                    return {**extraction_error, "target_url": flow2api_url}
 
             logger.info(f"[{profile['name']}] Extracted session via {token_source}")
             token_to_push = token
@@ -349,35 +358,32 @@ class TokenSyncer:
             # otherwise the stale pre-login snapshot is sent to the other server.
             fresh_profile = await profile_db.get_profile(profile_id) or {}
             options = {}
-            raw = fresh_profile.get("google_cookies")
-            if raw:
-                try:
-                    cookies = json.loads(raw) if isinstance(raw, str) else raw
-                except (ValueError, TypeError):
-                    cookies = None
-                if isinstance(cookies, list) and cookies:
-                    options["google_cookies"] = cookies
+            cookies = scoped_google_cookies(fresh_profile.get("google_cookies"))
+            checked = validate_google_cookies(cookies)
+            if not checked["success"]:
+                return checked
+            options["google_cookies"] = cookies
             # Source localhost and destination localhost can be different machines.
             # Only an explicit destination binding may overwrite server configuration.
             target_proxy = str(fresh_profile.get("captcha_proxy_url") or "").strip()
             if target_proxy:
                 options["captcha_proxy_url"] = target_proxy
-            if not config.protocol_refresh_enabled and "google_cookies" not in options:
-                return {"success": False, "error": "Flow browser cookies missing; open Flow in the source profile and sync again"}
             return await self._push_to_flow2api(token_to_push, flow2api_url, connection_token, **options)
 
         result = await push_current_session()
 
-        if not result["success"] and extract_mode != "gemini_cookies" and token_source == "protocol":
+        if (not result["success"] and extract_mode != "gemini_cookies" and token_source == "protocol"
+                and result.get("error_code") in {"auth_required", "cookies_incomplete"}):
             logger.warning(
                 f"[{profile['name']}] Protocol-derived session push failed: {result.get('error')}; retrying with browser extraction"
             )
-            await profile_db.update_profile(profile_id, google_cookies=None)
             browser_token = await self._extract_token_with_timeout(profile)
             if browser_token:
                 token_to_push = browser_token
                 token_source = "browser"
                 result = await push_current_session()
+            else:
+                result = browser_manager.get_session_error(profile_id)
 
         if result["success"]:
             success_result = f"success: {result.get('action', 'synced')}"
@@ -500,13 +506,16 @@ class TokenSyncer:
                     )
 
                     if not check_result["success"]:
-                        logger.warning(
-                            f"[{flow2api_url}] 无法查询 token 状态: {check_result.get('error')}，回退到该目标全量同步"
-                        )
-                        group_result = await self._sync_profiles_force(target_profiles)
-                        results.extend(group_result["results"])
-                        success_count += group_result["success_count"]
-                        error_count += group_result["error_count"]
+                        # A failed destination check is not evidence that every
+                        # Google session expired. Avoid a full-account login storm.
+                        for profile in target_profiles:
+                            message = check_result.get("error") or "目标状态暂无法确认"
+                            await self._update_profile_check_result(profile["id"], f"failed: {message}")
+                            await self._record_sync_result(profile, flow2api_url, False, message=message)
+                            results.append({"profile_id": profile["id"], "profile_name": profile["name"],
+                                            **check_result, "target_url": flow2api_url})
+                            error_count += 1
+                            self._total_error_count += 1
                         continue
 
                     token_lookup = {
@@ -624,14 +633,17 @@ class TokenSyncer:
         url = f"{flow2api_url}/api/plugin/update-token"
         payload = {"session_token": session_token}
         if google_cookies is not None:
-            if not any(c.get("domain") == ".google.com" and c.get("name") in {"SID", "__Secure-1PSID", "__Secure-3PSID"} and c.get("value") for c in google_cookies):
-                return {"success": False, "error": "Google 主域登录 Cookie 不完整，请在源 Profile 登录后重新同步"}
+            google_cookies = scoped_google_cookies(google_cookies)
+            checked = validate_google_cookies(google_cookies)
+            if not checked["success"]:
+                return checked
             payload["google_cookies"] = google_cookies
         if captcha_proxy_url:
             payload["captcha_proxy_url"] = captcha_proxy_url
 
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            # Server verifies OAuth on the account proxy before acknowledging the write.
+            async with httpx.AsyncClient(timeout=90) as client:
                 response = await client.post(
                     url,
                     json=payload,
@@ -642,16 +654,10 @@ class TokenSyncer:
                 )
 
                 if response.status_code != 200:
-                    detail = (response.text or "").strip()
-                    if len(detail) > 300:
-                        detail = detail[:300] + "..."
-                    return {
-                        "success": False,
-                        "error": f"HTTP {response.status_code}: {detail}",
-                    }
+                    return destination_error(response)
 
                 data = response.json()
-                if data.get("success") is not True:
+                if not isinstance(data, dict) or data.get("success") is not True:
                     return {"success": False, "error": "Flow2API did not acknowledge the session update"}
                 if google_cookies is not None and (data.get("cookies_updated") is not True or data.get("flow_cookies_configured") is not True or data.get("google_session_cookies_configured") is not True):
                     return {"success": False, "error": "Flow cookie synchronization was not confirmed; upgrade Flow2API and refresh the source profile"}
@@ -659,6 +665,14 @@ class TokenSyncer:
                     return {"success": False, "error": "目标账号未绑定代理，请配置目标 Flow2API 可访问的同出口代理地址"}
                 if captcha_proxy_url and (data.get("proxy_updated") is not True or data.get("proxy_configured") is not True):
                     return {"success": False, "error": "Flow2API did not acknowledge the destination proxy binding"}
+                if google_cookies is not None:
+                    if data.get("oauth_verified") is not True:
+                        return failure("oauth_unconfirmed", "目标未确认 Labs 实际鉴权，请先升级 Flow2API；不能将已接收视为已恢复")
+                    if data.get("account_active") is False:
+                        return {**failure("account_disabled", "会话已保存并通过鉴权，但目标账号仍禁用；请检查目标手动禁用状态或自动启用设置"),
+                                "synced": True, "account_active": data.get("account_active"), "oauth_verified": True}
+                    if data.get("account_active") is not True:
+                        return failure("activation_unconfirmed", "目标未确认账号启用状态，请升级目标服务并检查账号状态")
                 message = data.get("message", "")
                 email = None
                 if " for " in message:
@@ -669,9 +683,10 @@ class TokenSyncer:
                     "action": data.get("action"),
                     "message": message,
                     "email": email,
+                    **({"oauth_verified": True, "account_active": True} if google_cookies is not None else {}),
                 }
-        except Exception as exc:
-            return {"success": False, "error": str(exc)}
+        except Exception:
+            return failure("destination_unavailable", "同步响应未确认，请检查目标账号状态后再重试；未清除源 Cookie")
 
     def get_status(self) -> Dict[str, Any]:
         return {
