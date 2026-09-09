@@ -13,6 +13,7 @@ from .config import config
 from .database import profile_db
 from .proxy_utils import parse_proxy, format_proxy_for_playwright
 from .logger import logger
+from .browser_profile import configure_web_only_profile
 
 try:
     import pyautogui
@@ -93,6 +94,10 @@ class BrowserManager:
         self._active_context: Optional[BrowserContext] = None
         self._active_profile_id: Optional[int] = None
         self._lock = asyncio.Lock()
+
+    async def _launch_persistent_context(self, **kwargs):
+        configure_web_only_profile(kwargs["user_data_dir"])
+        return await self._playwright.chromium.launch_persistent_context(**kwargs)
 
     async def start(self):
         """启动 Playwright"""
@@ -1092,7 +1097,7 @@ class BrowserManager:
                 self._clean_locks(profile_dir)
                 proxy = await self._get_proxy(profile)
 
-                context = await self._playwright.chromium.launch_persistent_context(
+                context = await self._launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,
                     viewport={"width": 1024, "height": 768},
@@ -1146,7 +1151,7 @@ class BrowserManager:
 
                     self._clean_locks(profile_dir)
                     proxy = await self._get_proxy(profile)
-                    context = await self._playwright.chromium.launch_persistent_context(
+                    context = await self._launch_persistent_context(
                         user_data_dir=profile_dir,
                         headless=True,
                         viewport={"width": 1024, "height": 768},
@@ -1212,7 +1217,7 @@ class BrowserManager:
                 proxy = await self._get_proxy(profile)
 
                 # 非 headless，用于 VNC 登录
-                self._active_context = await self._playwright.chromium.launch_persistent_context(
+                self._active_context = await self._launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=False,  # VNC 可见
                     viewport={"width": 1024, "height": 768},
@@ -1313,7 +1318,7 @@ class BrowserManager:
                 os.makedirs(profile_dir, exist_ok=True)
 
                 # Headless + 持久化上下文
-                context = await self._playwright.chromium.launch_persistent_context(
+                context = await self._launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,  # Headless 省资源
                     viewport={"width": 1024, "height": 768},
@@ -1415,7 +1420,7 @@ class BrowserManager:
                 if config.enable_vnc:
                     use_vnc = await self._ensure_vnc_stack()
 
-                context = await self._playwright.chromium.launch_persistent_context(
+                context = await self._launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=not use_vnc,
                     viewport={"width": 1280, "height": 900},
@@ -1542,7 +1547,7 @@ class BrowserManager:
 
                 self._clean_locks(profile_dir)
                 proxy = await self._get_proxy(profile)
-                context = await self._playwright.chromium.launch_persistent_context(
+                context = await self._launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,
                     viewport={"width": 1024, "height": 768},
