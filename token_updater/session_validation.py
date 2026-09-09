@@ -42,8 +42,16 @@ def validate_labs_session(data: Any, expected_email: str = "", *, now=None) -> d
 def validate_credits(status: int, data: Any) -> dict:
     if status == 401:
         return failure("auth_required", "Labs access token 已失效，请在源 Profile 重新授权")
-    if status == 200 and isinstance(data, dict):
+    if status == 200 and isinstance(data, dict) and "error" not in data:
         credits = data.get("credits")
+        # Observed HTTP 200 for exhausted accounts omits the zero protobuf scalar.
+        # Require the complete authenticated tier response, not an arbitrary {}.
+        if ("credits" not in data and isinstance(data.get("serviceTier"), str)
+                and data["serviceTier"].startswith("SERVICE_TIER_")
+                and isinstance(data.get("userPaygateTier"), str)
+                and data["userPaygateTier"].startswith("PAYGATE_TIER_")
+                and isinstance(data.get("sku"), str) and data["sku"].strip()):
+            credits = 0
         if isinstance(credits, (int, float)) and not isinstance(credits, bool) and math.isfinite(credits) and credits >= 0:
             return {"success": True}
     return failure("verification_unavailable", "账号鉴权暂时无法确认，请检查源代理或稍后重试；未清除 Cookie")

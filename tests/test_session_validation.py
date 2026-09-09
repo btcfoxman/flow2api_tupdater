@@ -51,6 +51,17 @@ def test_zero_balance_still_proves_authentication():
     assert validate_credits(200, {"credits": 0})["success"]
 
 
+def test_observed_zero_balance_may_omit_credits_scalar():
+    data={"serviceTier":"SERVICE_TIER_INTERMEDIATE", "sku":"G1_TIER1", "userPaygateTier":"PAYGATE_TIER_ONE"}
+    assert validate_credits(200, data)["success"]
+    assert "credits" not in data
+    for invalid in [{**data, "error":{}}, {**data,"sku":""},
+                    {**data,"serviceTier":None}, {**data,"credits":None}]:
+        assert not validate_credits(200, invalid)["success"]
+    for status in [401,403,429,503]:
+        assert not validate_credits(status,data)["success"]
+
+
 def test_secure_psid_only_snapshot_is_incomplete():
     partial = [{**c, "name": "__Secure-1PSID"} if c["name"] == "SID" else c for c in JAR]
     assert validate_google_cookies(partial)["error_code"] == "cookies_incomplete"
