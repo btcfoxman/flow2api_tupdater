@@ -42,6 +42,8 @@ Flow2API Token Updater 是一个轻量级的多账号令牌刷新工具。
    - 按”最终生效目标地址 + 最终生效令牌”分组
    - 先调用 Flow2API 的 `check-tokens` 接口，只刷新需要刷新的 Profile
    - 如果目标端检查失败，该分组记录失败并等待下次调度；不会因服务故障触发全部源账号重新登录
+   - 目标 Flow2API 必须提供带连接 Token 鉴权的 `POST /api/plugin/check-tokens`。404/405 会显示具体接口及 HTTP 状态码；请先补齐/升级接收端，而不是反复重新登录。目标地址填写基础地址，不是完整的 `/api/plugin/update-token` 路径。
+   - 状态响应中的 `sync_allowed=false` 表示目标不允许外部会话同步（如服务器独立登录），智能同步会优先跳过；人工强制同步仍受目标端的防覆盖校验保护。
 
 ### 登录方式
 

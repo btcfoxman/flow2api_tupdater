@@ -103,6 +103,9 @@ class TokenSyncer:
         if not token_info:
             return True, "目标端不存在该 Token 记录"
 
+        if token_info.get("sync_allowed") is False:
+            return False, "目标不允许外部会话同步（如服务器独立登录），请在目标管理登录态"
+
         if not token_info.get("is_active", True):
             return True, "目标端 Token 已失活"
 
@@ -231,7 +234,7 @@ class TokenSyncer:
                 )
 
                 if response.status_code != 200:
-                    return destination_error(response)
+                    return destination_error(response, endpoint="check-tokens")
 
                 data = response.json()
                 if not isinstance(data, dict) or not isinstance(data.get("tokens"), list):
@@ -654,7 +657,7 @@ class TokenSyncer:
                 )
 
                 if response.status_code != 200:
-                    return destination_error(response)
+                    return destination_error(response, endpoint="update-token")
 
                 data = response.json()
                 if not isinstance(data, dict) or data.get("success") is not True:

@@ -34,6 +34,8 @@ def client_for(status, data):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status,detail,code", [
     (401, "invalid token", "destination_auth"), (403, "disabled", "destination_auth"),
+    (404, "Not Found", "destination_endpoint"), (405, "Method Not Allowed", "destination_endpoint"),
+    (307, "redirect", "destination_redirect"), (422, "bad input", "destination_rejected"),
     (409, "protected profile", "independent_login"), (429, "busy", "destination_unavailable"),
     (503, "verification temporary", "destination_unavailable"),
     (400, "Invalid captcha_proxy_url", "destination_proxy"),
@@ -45,6 +47,7 @@ async def test_destination_failures_are_classified_without_body_leak(status, det
         result = await TokenSyncer()._push_to_flow2api("st", "http://server", "key", google_cookies=JAR)
     assert result["error_code"] == code
     assert result["status_code"] == status
+    assert f"HTTP {status}" in result["error"]
     assert "secret-value" not in str(result)
 
 
@@ -87,17 +90,23 @@ async def test_protocol_push_failure_does_not_clear_cookies_or_relogin(code):
 
 
 @pytest.mark.asyncio
-async def test_target_check_failure_does_not_force_full_source_login_batch():
+@pytest.mark.parametrize("status", [401, 404, 405, 429, 503])
+async def test_target_check_failure_does_not_force_full_source_login_batch(status):
     syncer = TokenSyncer()
     with patch("token_updater.updater.profile_db.get_active_profiles", AsyncMock(return_value=[PROFILE])), \
          patch("token_updater.updater.profile_db.update_profile", AsyncMock()), \
          patch("token_updater.updater.profile_db.record_sync_event", AsyncMock()), \
          patch("token_updater.updater.dashboard_events.publish", AsyncMock()), \
-         patch.object(syncer, "_check_tokens_status", AsyncMock(return_value={"success": False, "error_code": "destination_auth", "error": "connection rejected"})), \
+         patch("token_updater.updater.httpx.AsyncClient", return_value=client_for(status, {"detail":"private-response"})), \
          patch.object(syncer, "_sync_profile", AsyncMock()) as sync:
         result = await syncer.sync_all_profiles()
     sync.assert_not_awaited()
     assert result["error_count"] == 1
+    assert result["results"][0]["status_code"] == status
+    assert f"HTTP {status}" in result["results"][0]["error"]
+    assert "private-response" not in str(result)
+    if status in (404, 405):
+        assert "/api/plugin/check-tokens" in result["results"][0]["error"]
 
 
 @pytest.mark.asyncio
