@@ -17,7 +17,7 @@ from .browser_profile import configure_web_only_profile
 from .session_validation import (
     LABS_SESSION_URL, LABS_CSRF_URL, LABS_SIGNIN_URL, CREDITS_URL,
     cookie_is_live, failure, scoped_google_cookies, validate_google_cookies,
-    validate_labs_session, validate_credits,
+    validate_labs_session, validate_credits, validate_flow_identity, FLOW_IDENTITY_EXPRESSION,
 )
 
 try:
@@ -876,6 +876,45 @@ class BrowserManager:
 
         return True
 
+    async def _settle_flow_session(self, profile: Dict[str, Any], page) -> bool:
+        """Follow the Flow/Google login UI without probing or waiting for Labs cookies."""
+        native_prompts = 0
+        for _ in range(40):
+            body_text = await self._safe_page_text(page)
+            blocker = self._detect_login_blocker(body_text)
+            if blocker:
+                self._session_errors[profile["id"]] = failure("manual_action_required", blocker)
+                return False
+            hostname = urlparse(str(page.url)).hostname
+            if hostname == "flow.google.com":
+                try:
+                    result = validate_flow_identity(await page.evaluate(FLOW_IDENTITY_EXPRESSION), self._resolve_known_email(profile) or "")
+                    if result["success"]:
+                        return True
+                    if result.get("error_code") == "identity_mismatch":
+                        self._session_errors[profile["id"]] = result
+                        return False
+                except Exception:
+                    pass
+                if await self._click_first_visible(page, ['a[href^="https://accounts.google.com/"]']):
+                    continue
+            elif hostname == "accounts.google.com":
+                account = self._resolve_known_email(profile) or ""
+                if account and await self._click_account_choice(page, account):
+                    continue
+                if profile.get("login_account") and profile.get("login_password"):
+                    if await self._advance_google_login(page, profile["login_account"], profile["login_password"]):
+                        continue
+                if await self._handle_managed_account_prompts(page, body_text):
+                    continue
+            elif hostname not in {None, "about:blank"}:
+                return False
+            if native_prompts < 3 and not str(body_text or "").strip() and await self._handle_native_chrome_profile_prompts():
+                native_prompts += 1
+                continue
+            await asyncio.sleep(0.5)
+        return False
+
     async def _settle_labs_session(self, profile: Dict[str, Any], context: BrowserContext, page) -> Optional[str]:
         native_prompt_attempts = 0
         for _ in range(40):
@@ -1029,29 +1068,24 @@ class BrowserManager:
         return result
 
     async def _complete_flow_session(self, profile, context, page) -> Optional[str]:
-        result = await self._ensure_labs_authorization(profile, context, page)
-        if result["success"]:
+        try:
             if urlparse(str(page.url)).hostname != "flow.google.com":
                 await page.goto(config.flow_url, wait_until="domcontentloaded", timeout=60000)
             await self._wait_for_flow_cookies(context)
-            location = urlparse(str(page.url))
-            if location.hostname != "flow.google.com" or location.path.rstrip("/") == "/about":
-                result = failure("cookies_incomplete", "源浏览器仍停留在 Flow 未登录页面，请完成 Flow 登录后同步")
-            elif not await self._save_google_cookies_from_context(profile["id"], context):
+            result = validate_flow_identity(await page.evaluate(FLOW_IDENTITY_EXPRESSION), self._resolve_known_email(profile) or "")
+            if result["success"] and not await self._save_google_cookies_from_context(profile["id"], context):
                 result = failure("cookies_incomplete", "Flow/Google 登录 Cookie 不完整，请在源 Profile 完成 Flow 登录")
+            if result["success"]:
+                result = validate_flow_identity(await page.evaluate(FLOW_IDENTITY_EXPRESSION), result["email"])
+        except Exception:
+            result = failure("flow_login_required", "源 Flow 登录身份尚未确认，请检查源代理和新站登录态")
         if not result["success"]:
             self._session_errors[profile["id"]] = result
             await self._persist_login_state(profile["id"], None)
             return None
-        # Flow navigation can rotate cookies too; don't return an earlier ST snapshot.
-        token = await self._get_session_cookie(context)
-        if token != result.get("session_token"):
-            checked = await self._validate_context_session(context, result["email"])
-            if not checked["success"]:
-                self._session_errors[profile["id"]] = checked
-                await self._persist_login_state(profile["id"], None)
-                return None
-            token = checked["session_token"]
+        # Non-secret extraction receipt retained for the existing browser API;
+        # the updater sends the cookie jar and never sends this as a credential.
+        token = "flow:" + result["email"]
         await self._persist_login_state(profile["id"], token, email=result["email"])
         self._session_errors.pop(profile["id"], None)
         return token
@@ -1193,7 +1227,7 @@ class BrowserManager:
     async def import_cookies(self, profile_id: int, cookies_json: str) -> Dict[str, Any]:
         """导入 Cookie（JSON），写入到持久化 profile 中"""
         if len(cookies_json) > 300_000:
-            return {"success": False, "error": "Cookie 内容过大（建议只导出 labs.google 域名的 Cookie）"}
+            return {"success": False, "error": "Cookie 内容过大，请仅导出 Google/Flow 会话域的 Cookie"}
 
         async with self._lock:
             profile = await profile_db.get_profile(profile_id)
@@ -1235,7 +1269,7 @@ class BrowserManager:
 
                 await context.add_cookies(cookies)
 
-                # 导入后访问 labs 页面刷新 session
+                # 导入后在 Flow 新站验证身份，不续期 Labs OAuth。
                 token = await self._extract_from_context(profile, context)
 
                 return {
@@ -1256,7 +1290,7 @@ class BrowserManager:
                         pass
 
     async def export_cookies(self, profile_id: int) -> Dict[str, Any]:
-        """导出 labs.google 域名 Cookie，格式与导入接口兼容。"""
+        """导出保留作用域与有效期的 Google/Flow Cookie，不导出 Labs 会话。"""
         async with self._lock:
             profile = await profile_db.get_profile(profile_id)
             if not profile:
@@ -1265,7 +1299,7 @@ class BrowserManager:
             context = None
             try:
                 if self._active_profile_id == profile_id and self._active_context:
-                    cookies = await self._active_context.cookies("https://labs.google")
+                    cookies = scoped_google_cookies(await self._active_context.cookies())
                 else:
                     profile_dir = self._get_profile_dir(profile_id)
                     if not os.path.exists(profile_dir):
@@ -1286,7 +1320,7 @@ class BrowserManager:
                         args=BROWSER_ARGS,
                         ignore_default_args=["--enable-automation"],
                     )
-                    cookies = await context.cookies("https://labs.google")
+                    cookies = scoped_google_cookies(await context.cookies())
 
                 if not cookies:
                     return {"success": False, "error": "当前账号暂无可导出的 Cookie"}
@@ -1301,7 +1335,8 @@ class BrowserManager:
                     "cookie_count": len(cookies),
                     "count": len(cookies),
                     "cookies_json": json.dumps(cookies, ensure_ascii=False, indent=2),
-                    "has_token": any(c.get("name") == config.session_cookie_name for c in cookies),
+                    "has_token": validate_google_cookies(cookies)["success"],
+                    "auth_mode": "flow",
                 }
 
             except Exception as e:
@@ -1355,7 +1390,7 @@ class BrowserManager:
                 self._active_profile_id = profile_id
 
                 page = self._active_context.pages[0] if self._active_context.pages else await self._active_context.new_page()
-                await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=90000)
+                await page.goto(config.flow_url, wait_until="domcontentloaded", timeout=90000)
 
                 logger.info(f"[{profile['name']}] 浏览器已启动，请通过 VNC 登录")
                 return True
@@ -1465,25 +1500,25 @@ class BrowserManager:
                     logger.info(f"[{profile['name']}] Headless 浏览器已关闭")
 
     async def _extract_from_context(self, profile: Dict[str, Any], context: BrowserContext) -> Optional[str]:
-        """从上下文提取 Token（通过 signin 页面刷新 session）"""
+        """从 Flow 新站验证源身份并提取完整 Cookie 会话。"""
         page = None
         self._session_errors.pop(profile["id"], None)
         try:
             page = await context.new_page()
             await self._install_page_route(page)
 
-            # 访问 labs 页面，必要时自动推进 Google / 托管资料 / labs 首次引导。
-            logger.info(f"[{profile['name']}] 访问 {config.labs_url} 刷新 session...")
-            await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=60000)
+            # 仅访问 Flow/Google 登录链路。
+            logger.info(f"[{profile['name']}] 验证 Flow 新站登录态...")
+            await page.goto(config.flow_url, wait_until="domcontentloaded", timeout=60000)
 
-            await self._settle_labs_session(profile, context, page)
+            await self._settle_flow_session(profile, page)
             if self._session_errors.get(profile["id"], {}).get("error_code") == "manual_action_required":
                 await self._persist_login_state(profile["id"], None)
                 return None
             return await self._complete_flow_session(profile, context, page)
 
         except Exception as e:
-            self._session_errors[profile["id"]] = failure("extraction_failed", "源浏览器会话提取失败，请检查代理连接并完成 Labs/Flow 登录")
+            self._session_errors[profile["id"]] = failure("extraction_failed", "源浏览器会话提取失败，请检查代理连接并完成 Flow 新站登录")
             await self._persist_login_state(profile["id"], None)
             logger.error(f"[{profile['name']}] 提取异常 ({type(e).__name__})")
             return None
@@ -1536,40 +1571,11 @@ class BrowserManager:
 
                 page = context.pages[0] if context.pages else await context.new_page()
                 await self._install_page_route(page)
-                await page.goto(config.login_url, wait_until="domcontentloaded", timeout=60000)
-
-                for _ in range(45):
-                    try:
-                        await page.wait_for_load_state("domcontentloaded", timeout=3000)
-                    except Exception:
-                        pass
-
-                    body_text = await self._safe_page_text(page)
-                    blocker = self._detect_login_blocker(body_text)
-                    if blocker:
-                        await self._persist_login_state(
-                            profile_id,
-                            None,
-                            email=self._resolve_known_email(profile, body_text),
-                        )
-                        return {"success": False, "error": blocker, "requires_manual_action": True}
-
-                    if use_vnc and not str(body_text or "").strip() and await self._handle_native_chrome_profile_prompts():
-                        continue
-
-                    if await self._handle_managed_account_prompts(page, body_text):
-                        continue
-
-                    if await self._advance_google_login(page, login_account, login_password):
-                        continue
-
-                    if await self._handle_labs_onboarding(page, body_text):
-                        continue
-
-                    if await self._is_labs_session_ready(page, body_text):
-                        break
-
-                    await asyncio.sleep(1.0)
+                await page.goto(config.flow_url, wait_until="domcontentloaded", timeout=60000)
+                await self._settle_flow_session(profile, page)
+                if self._session_errors.get(profile_id, {}).get("error_code") == "manual_action_required":
+                    await self._persist_login_state(profile_id, None)
+                    return {**self.get_session_error(profile_id), "requires_manual_action": True}
 
                 token = await self._complete_flow_session(profile, context, page)
                 if not token:
@@ -1620,23 +1626,31 @@ class BrowserManager:
         }
 
     async def _peek_context_session(self, profile, context) -> Optional[str]:
-        result = await self._validate_context_session(context, self._resolve_known_email(profile) or "")
-        if result["success"]:
-            try:
-                cookies = scoped_google_cookies(await context.cookies())
-                checked = validate_google_cookies(cookies)
-            except Exception:
-                checked = failure("verification_unavailable", "暂无法读取源浏览器 Cookie，请稍后重试")
-            if not checked["success"]:
-                result = checked
+        owned_page = None
+        try:
+            result = validate_google_cookies(scoped_google_cookies(await context.cookies()))
+            if result["success"]:
+                page = next((p for p in context.pages if urlparse(str(p.url)).hostname == "flow.google.com"), None)
+                if page is None:
+                    page = owned_page = await context.new_page()
+                    await page.goto(config.flow_url, wait_until="domcontentloaded", timeout=30000)
+                result = validate_flow_identity(await page.evaluate(FLOW_IDENTITY_EXPRESSION), self._resolve_known_email(profile) or "")
+        except Exception:
+            result = failure("verification_unavailable", "暂无法确认 Flow 登录身份，未发起 Labs 授权")
+        finally:
+            if owned_page:
+                try:
+                    await owned_page.close()
+                except Exception:
+                    pass
         if not result["success"]:
             self._session_errors[profile["id"]] = result
             return None
         self._session_errors.pop(profile["id"], None)
-        return result["session_token"]
+        return "flow:" + result["email"]
 
     async def peek_token(self, profile_id: int) -> Optional[str]:
-        """Verify existing OAuth without triggering a sign-in or changing browser pages."""
+        """Verify the Flow session without initiating OAuth or changing user-owned tabs."""
         async with self._lock:
             profile = await profile_db.get_profile(profile_id)
             if not profile:

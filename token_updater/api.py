@@ -1,4 +1,4 @@
-"""Token Updater API v3.3"""
+"""Token Updater API v3.4 (Flow-native sessions)."""
 import secrets
 import time
 from datetime import datetime, timedelta
@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -21,9 +21,10 @@ from .execution import execution_gate
 from .logger import logger
 from .proxy_utils import validate_proxy_format
 from .updater import token_syncer
+from .session_validation import flow_receipt_email, scoped_google_cookies, validate_google_cookies
 
 
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.4.0"
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 DASHBOARD_HOURS_OPTIONS = (6, 24, 72, 168)
@@ -1016,28 +1017,22 @@ async def protocol_login(profile_id: int, request: ProtocolLoginRequest, token: 
             raise HTTPException(400, "源 Profile 已启用代理但未填写地址，已停止请求以避免使用默认出口")
         result = await protocol_loginer.login(google_cookies, proxy=proxy_url, email=profile.get("email"))
 
-        if result.get("success") and result.get("session_token"):
-            # Keep the browser hydration inside the operation gate, including
-            # Google's scoped cookies and any chunked legacy session cookie.
+        if result.get("success"):
+            # Hydrate only scoped Google/Flow cookies. A flow:<email> receipt
+            # must never be written into a Labs cookie or sent as OAuth ST.
             import json as _json
-            seed_cookies = _google_browser_seed(_json.dumps(result["google_cookies"]) if "google_cookies" in result else google_cookies)
-            session = result["session_token"]
-            chunks = [session[i:i + 3800] for i in range(0, len(session), 3800)]
-            for i, chunk in enumerate(chunks):
-                seed_cookies.append({
-                    "name": config.session_cookie_name + (f".{i}" if len(chunks) > 1 else ""),
-                    "value": chunk,
-                    "domain": "labs.google",
-                    "path": "/",
-                    "secure": True,
-                    "httpOnly": True,
-                    "sameSite": "Lax",
-                })
+            email = flow_receipt_email(result.get("session_token"), profile.get("email"))
+            seed_cookies = scoped_google_cookies(result.get("google_cookies"))
+            if (result.get("auth_mode") != "flow" or not email or result.get("email") != email
+                    or not validate_google_cookies(seed_cookies)["success"]):
+                raise HTTPException(400, "新站身份或完整 Cookie 未确认，未覆盖源 Profile")
             imported = await browser_manager.import_cookies(profile_id, _json.dumps(seed_cookies))
             if not imported.get("success") or not imported.get("has_token"):
                 result = {"success": False, "error": "Google session refreshed, but Flow browser login is incomplete; open Flow and log in"}
             else:
                 await profile_db.update_profile(profile_id, login_method="protocol", is_logged_in=1)
+                result = {"success": True, "auth_mode": "flow", "email": email,
+                          "is_logged_in": True, "cookie_count": len(seed_cookies)}
 
     await dashboard_events.publish(
         "protocol_login",
@@ -1168,16 +1163,26 @@ async def ext_get_token(profile_id: int, api_key: str = Depends(verify_api_key))
         raise HTTPException(404, "Profile not found")
     if not profile.get("is_active"):
         raise HTTPException(400, "Profile is disabled")
-    token_value = await browser_manager.extract_token(profile_id)
+    async with execution_gate.hold("extract_token", profile_id=profile_id,
+                                   profile_name=profile.get("name", "")):
+        token_value = await browser_manager.extract_token(profile_id)
+        fresh = await profile_db.get_profile(profile_id) or {}
     if not token_value:
         raise HTTPException(400, "Failed to extract token")
-    return {
+    email = flow_receipt_email(token_value, profile.get("email"))
+    cookies = scoped_google_cookies(fresh.get("google_cookies"))
+    if not email or not validate_google_cookies(cookies)["success"]:
+        raise HTTPException(400, "Flow 身份或 Cookie 未确认，请升级同步端并重新验证源 Profile")
+    return JSONResponse({
         "success": True,
         "profile_id": profile_id,
         "profile_name": profile["name"],
-        "email": profile.get("email"),
-        "session_token": token_value,
-    }
+        "email": email,
+        "auth_mode": "flow",
+        "session_token": None,
+        "google_cookies": cookies,
+        "captcha_proxy_url": fresh.get("captcha_proxy_url") or None,
+    }, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/v1/profiles/{profile_id}/sync")

@@ -56,7 +56,7 @@ class FakeSession:
 async def test_protocol_verifies_and_exports_rotated_scoped_cookies():
     session = FakeSession()
     with patch("token_updater.protocol_login.AsyncSession", return_value=session) as factory:
-        result = await ProtocolLogin().login(json.dumps(JAR), proxy="socks5://127.0.0.1:20020", email="user@example.com")
+        result = await ProtocolLogin()._login_labs_legacy(json.dumps(JAR), proxy="socks5://127.0.0.1:20020", email="user@example.com")
     assert result["success"]
     assert result["session_token"] == "firstrotated"
     assert any(c["name"] == "SID" and c["value"] == "rotated-root" for c in result["google_cookies"])
@@ -76,7 +76,7 @@ async def test_protocol_verifies_and_exports_rotated_scoped_cookies():
 async def test_protocol_st_cookie_is_not_proof_of_valid_authorization(payload, status, code):
     session = FakeSession(payload, status)
     with patch("token_updater.protocol_login.AsyncSession", return_value=session):
-        result = await ProtocolLogin().login(json.dumps(JAR), email="user@example.com")
+        result = await ProtocolLogin()._login_labs_legacy(json.dumps(JAR), email="user@example.com")
     assert result["error_code"] == code
     assert "session_token" not in result
 
@@ -85,7 +85,7 @@ async def test_protocol_st_cookie_is_not_proof_of_valid_authorization(payload, s
 async def test_expired_structured_cookies_are_not_revived_as_flat_session_cookies():
     with patch("token_updater.protocol_login.AsyncSession") as factory:
         result = await ProtocolLogin().login(json.dumps([{**JAR[0], "expires": 1}]))
-    assert result["error_code"] == "auth_required"
+    assert result["error_code"] == "cookies_incomplete"
     factory.assert_not_called()
 
 

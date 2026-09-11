@@ -1,4 +1,4 @@
-"""curl_cffi 指纹请求协议登录 labs.google — 走 NextAuth + Google OAuth 流程"""
+"""Flow-native cookie/identity probe; the old Labs implementation is legacy-only."""
 import json
 import re
 from typing import Any, Dict, List, Optional
@@ -166,6 +166,54 @@ class ProtocolLogin:
         return server
 
     async def login(
+        self, google_cookies_raw: str, proxy: Optional[str] = None, email: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Validate the Flow session only; never initiate a Labs OAuth grant."""
+        from .session_validation import validate_google_cookies, validate_flow_identity
+        seed = scoped_google_cookies(google_cookies_raw)
+        checked = validate_google_cookies(seed)
+        if not checked["success"]:
+            return checked
+        proxy_url = self._get_proxy_url(proxy)
+        if proxy and not proxy_url:
+            return failure("source_proxy", "源代理地址无效，已停止请求以避免走默认出口")
+        try:
+            async with AsyncSession(impersonate=self.IMPERSONATE, timeout=30, trust_env=False, proxy=proxy_url) as session:
+                for cookie in seed:
+                    session.cookies.set(cookie["name"], cookie["value"], domain=cookie["domain"], path=cookie.get("path", "/"), secure=bool(cookie.get("secure", True)))
+                originals = {(c["name"], c["domain"], c.get("path", "/")): c for c in seed}
+                for cookie in session.cookies.jar:
+                    original = originals.get((cookie.name, cookie.domain, cookie.path), {})
+                    cookie.domain_specified = str(original.get("domain", "")).startswith(".")
+                    cookie.domain_initial_dot = cookie.domain_specified
+                    expires = original.get("expires")
+                    if expires is not None and float(expires) > 0:
+                        cookie.expires = int(float(expires))
+                        cookie.discard = False
+                    if original.get("httpOnly"):
+                        cookie.set_nonstandard_attr("HttpOnly", None)
+                    if original.get("sameSite"):
+                        cookie.set_nonstandard_attr("SameSite", original["sameSite"])
+                response = await session.get("https://flow.google.com/", allow_redirects=False)
+                if response.status_code != 200:
+                    return failure("flow_login_required", "Flow 会话需在源浏览器确认，未尝试 Labs 授权")
+                match = re.search(r"WIZ_global_data\s*=\s*", response.text)
+                wiz = json.JSONDecoder().raw_decode(response.text[match.end():])[0] if match else {}
+                result = validate_flow_identity({"origin":"https://flow.google.com", "path":"/",
+                    "ready":all(bool(wiz.get(k)) for k in ("SNlM0e","cfb2h","FdrFJe")), "email":wiz.get("oPEP7c")}, email or "")
+                if not result["success"]:
+                    return result
+                refreshed = scoped_google_cookies([{"name":c.name,"value":c.value,"domain":c.domain,"path":c.path,
+                    "secure":c.secure,"expires":c.expires,"httpOnly":c.has_nonstandard_attr("HttpOnly"),
+                    "sameSite":c.get_nonstandard_attr("SameSite")} for c in session.cookies.jar])
+                checked = validate_google_cookies(refreshed)
+                if not checked["success"]:
+                    return checked
+                return {**result,"session_token":"flow:"+result["email"],"google_cookies":refreshed}
+        except Exception:
+            return failure("verification_unavailable", "协议检查未确认 Flow 身份，请通过源浏览器验证；Cookie 保留")
+
+    async def _login_labs_legacy(
         self,
         google_cookies_raw: str,
         proxy: Optional[str] = None,

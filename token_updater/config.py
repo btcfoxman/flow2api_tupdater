@@ -57,7 +57,7 @@ class Config(BaseModel):
     labs_url: str = "https://labs.google/fx/tools/flow"
     flow_url: str = "https://flow.google.com/"
     protocol_refresh_enabled: bool = False
-    login_url: str = "https://labs.google/fx/api/auth/signin/google"
+    login_url: str = "https://flow.google.com/"
     session_cookie_name: str = "__Secure-next-auth.session-token"
     token_extract_mode: str = "session"
     api_port: int

@@ -92,11 +92,13 @@ class BrowserLoginHelperTests(unittest.IsolatedAsyncioTestCase):
         }
         cookies = [
             {
-                "name": config.session_cookie_name,
+                "name": "SID",
                 "value": "secret-token",
-                "domain": ".labs.google",
+                "domain": ".google.com",
                 "path": "/",
-            }
+            },
+            {"name": "OSID", "value": "test-flow", "domain": "flow.google.com", "path": "/"},
+            {"name": "legacy", "value": "not-exported", "domain": "labs.google", "path": "/"}
         ]
         context = AsyncMock()
         context.cookies = AsyncMock(return_value=cookies)
@@ -107,9 +109,10 @@ class BrowserLoginHelperTests(unittest.IsolatedAsyncioTestCase):
             result = await self.manager.export_cookies(1)
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["count"], 2)
         self.assertTrue(result["has_token"])
-        context.cookies.assert_awaited_once_with("https://labs.google")
+        context.cookies.assert_awaited_once_with()
+        self.assertEqual(result["auth_mode"], "flow")
 
     async def test_export_cookies_requires_profile_data(self):
         profile = {

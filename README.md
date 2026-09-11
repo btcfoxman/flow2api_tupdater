@@ -2,10 +2,10 @@
 
 Flow2API Token Updater 是一个轻量级的多账号令牌刷新工具。
 支持两种刷新模式：**协议刷新**（纯 HTTP，无需浏览器）和**浏览器刷新**（Playwright 持久化上下文）。
-迁移到 `flow.google.com` 后默认使用浏览器刷新，取得完整 Google/Flow Cookie 与兼容 REST 的 Labs session。
-旧的纯协议刷新仅在 `FLOW_PROTOCOL_REFRESH_ENABLED=true` 时启用，不代表已建立新站会话。
+当前默认直接验证 `flow.google.com` 新站身份并取得完整 Google/Flow Cookie，不再依赖 Labs ST 或 OAuth AT。
+纯 HTTP 新站检查仅在 `FLOW_PROTOCOL_REFRESH_ENABLED=true` 时启用；它也不会发起 Labs OAuth，不能确认登录时回到源浏览器验证。
 
-当前版本重点解决三件事：
+当前版本重点支持：
 
 - 多账号管理
 - 单账号级别的 Flow2API 目标覆盖
@@ -14,11 +14,11 @@ Flow2API Token Updater 是一个轻量级的多账号令牌刷新工具。
 
 ## 亮点
 
-- **协议刷新**：无需浏览器，纯 HTTP 请求刷新 session token（由 [Hooper](https://github.com/Hooper27) 提供技术方案）
+- **协议检查**：在源代理下直接检查 Flow 新站身份和 Cookie 轮换，不将 HTTP 200 或 XSRF 当作 OAuth AT
 - 有界回退：协议授权失效时回退源浏览器；目标连接、代理、限流和独立登录保护错误不会触发重复登录或清空源 Cookie
 - 浏览器自动登录：支持自动填写账号密码登录（多语言：中/英/日/韩/西/法/德/葡/俄）
 - 运行时轻量：只有在需要登录时才会启动 VNC / Xvfb / noVNC
-- Cookie 导入：支持导入 Google cookies 进行协议登录，或导入 labs.google cookies 恢复会话
+- Cookie 导入/导出：保留完整 Google/Flow Cookie 的域名、路径与有效期；只有 Labs Cookie 不足以恢复新站登录
 - 完整会话：浏览器登录后提取带 domain/path/expiry 的 Google/Flow cookies，同步后由目标持久化浏览器继续轮换
 - 智能同步：按最终生效的 Flow2API 地址和令牌分组
 - 单账号覆盖：每个 Profile 都可以覆盖目标地址和连接令牌
@@ -32,12 +32,12 @@ Flow2API Token Updater 是一个轻量级的多账号令牌刷新工具。
 ### 刷新策略
 
 1. 每个账号维护独立持久化 Profile 和结构化 Google cookies（`google_cookies` 字段）。
-2. 默认在源 Profile 的代理下打开 Labs/Flow，校验 Labs `/auth/session` 的有效期、邮箱和 `/v1/credits` 实际鉴权，再等待 Flow 主域 Cookie。读到旧 ST、页面打开成功或 session HTTP 200 都不代表授权有效。
-3. 刷新后重新读取最新 Cookie 快照，再同步到目标。目标服务必须确认 Cookie、代理、`oauth_verified=true` 和 `account_active=true`，否则不报告账号已恢复。
+2. 默认在源 Profile 的代理下打开 Flow，验证新站 bootstrap 和准确邮箱，再提取 Google 主域 SID 与 Flow OSID。首页 HTTP 200、旧 ST 或单独存在 OSID 都不等于身份有效。
+3. 重新读取最新 Cookie 后发送 `auth_mode=flow`、邮箱、Cookie 和目标代理，不发送 `session_token` 或 OAuth AT。目标必须确认 Cookie、代理、`flow_identity_verified=true`、`native_session_verified=true` 和 `account_active=true`，否则不报告账号恢复。
    - Profile 的 `proxy_url` 用于源浏览器；新增 `captcha_proxy_url` 是目标 Flow2API 可访问的同出口代理地址。
-   - 首次同步或 ST 续期变化时必须填写 `captcha_proxy_url`。只有 ST 与目标保存值完全相同且已有代理绑定时，目标才可以沿用已有代理。不会自动复制源服务器的 `127.0.0.1` 地址。
+   - 新站同步必须填写 `captcha_proxy_url`，不会自动复制源服务器的 `127.0.0.1` 地址。配置值仍按 Profile 缓存优先。
    - 两台机器地址不同不代表出口不同；必须核对实际公网出口一致。
-   - 协议模式也必须校验授权并发送完整 Cookie；纯文本旧 Cookie 会先进入浏览器补全，不能裸 ST 提交。
+   - 协议模式也必须校验新站身份并发送完整 Cookie；不再执行 Labs 授权续期或裸 ST 提交。
 4. 同步结果分组逻辑：
    - 按”最终生效目标地址 + 最终生效令牌”分组
    - 先调用 Flow2API 的 `check-tokens` 接口，只刷新需要刷新的 Profile
@@ -47,17 +47,17 @@ Flow2API Token Updater 是一个轻量级的多账号令牌刷新工具。
 
 ### 登录方式
 
-升级顺序：先升级 Flow2API 服务端（支持 `google_cookies`、`oauth_verified`、`account_active` 等确认字段），再升级同步器，
-在每个源 Profile 完成 Labs 授权和 Flow 登录并手动同步。普通列表/API 不返回原始 Google Cookie；不要将 Cookie、页面 XSRF 或签名媒体链接写入日志。
+升级顺序：先升级 Flow2API 服务端（支持 `auth_mode=flow` 且运行 `native_cdp`），再升级同步器。
+在一个源 Profile 完成 Flow 新站登录并单账号验收，再恢复批量同步。普通列表/API 不返回原始 Google Cookie；不要将 Cookie、页面 XSRF 或签名媒体链接写入日志。
 
-接收确认只表示目标已保存配置，不保证跨机器登录可用。Google 可能存在设备/会话绑定；若目标 native Profile 查询返回 401 或跳转未登录页，需要在目标完成登录验收。不要反复重放 Cookie 或将其误判为流量 429。
+仅 `success=true` 的接收确认不等于目标可用。本版还要求目标返回同一邮箱、身份验证、native 会话预检和启用状态的完整确认。Google 可能存在设备/会话绑定；若目标 native Profile 查询返回 401 或跳转未登录页，需要在目标完成登录验收。不要反复重放 Cookie 或将其误判为流量 429。
 
 | 方式 | 说明 | 自动提取 cookies |
 |------|------|------------------|
 | VNC 手动登录 | 通过 noVNC 完成 Google 登录 | 是 |
 | 浏览器自动登录 | 配置账号密码后自动登录 | 是 |
 | 协议 Cookie 导入 | 导入 Google cookies 直接协议登录 | 直接使用 |
-| Labs Cookie 导入 | 导入 labs.google 域名 cookies 恢复会话 | 首次同步时提取 |
+| 浏览器 Cookie 导入 | 导入完整 Google/Flow Cookie，再验证源身份 | 是 |
 
 ## 快速开始
 
@@ -101,7 +101,7 @@ docker compose up -d --build
 7. 手动执行一次同步，确认账号可用。
 8. 后续刷新交给定时任务处理。
 
-### 流程 B：协议 Cookie 导入（推荐）
+### 流程 B：协议 Cookie 检查与导入
 
 1. 使用浏览器插件（如 Cookie Editor）导出以下域名的 cookies：
    - `.google.com` 域名下的所有 cookies
@@ -109,7 +109,7 @@ docker compose up -d --build
    - `flow.google.com` 的 cookies（包括 OSID）
 2. 创建一个 Profile。
 3. 点击 `协议登录`，粘贴合并后的 cookies JSON。
-4. 系统通过 OAuth 流程获取并校验 session token，然后在源浏览器补全和验证 Flow 登录。后续同步默认仍使用浏览器刷新。
+4. 系统在源代理下检查 Flow 新站身份，再将完整 Cookie 导入源浏览器并验证登录；不执行 Labs OAuth，不把内部 `flow:邮箱` 标识写入 Labs Cookie。后续同步默认仍使用浏览器刷新。
 
 > 提示：合并为一个 JSON 数组，保留 domain/path/expires，不能将不同域同名 Cookie 压平。Google 二次验证需人工完成。
 
@@ -215,7 +215,16 @@ docker compose up -d --build
 - `POST /v1/profiles/{id}/sync`
 - `GET /health`
 
+`GET /v1/profiles/{id}/token` 对新站返回 `auth_mode: "flow"`、`email`、结构化 `google_cookies` 和 Profile 配置的 `captcha_proxy_url`；`session_token` 为 `null`。调用方必须使用新 Cookie 结构，不能将内部 `flow:邮箱` 标识当作 ST 使用。此接口返回真实登录凭据，设置 `Cache-Control: no-store`；应只在受控环境调用，不记录响应体。`captcha_proxy_url` 为空时需先配置目标同出口代理才能同步。
+
 ## 升级说明
+
+### 2026-09-11 新站登录切换
+
+源和目标 Profile 仍分离，独立登录保护保留。新默认路径不访问 Labs OAuth；旧接收端缺少新站身份确认字段时会明确报升级，不能混装后反复同步。
+客户端成功仅代表目标身份/余额/项目预检通过，仍需单账号真实生成验收，不能保证所有模型或设备绑定 Cookie 可跨机器迁移。
+补齐了协议登录管理接口、对外取会话接口、结构化邮箱确认、Cookie 有效期别名与域边界，以及新版目标错误码。详见 [新站迁移核查与接口变更](docs/native-migration-audit-2026-09-11.md)。
+以下 2026-09-09 / v3.4 小节是历史记录，其中 Labs 授权流程不适用于当前默认新站路径。
 
 ### 2026-09-09 会话同步修复
 

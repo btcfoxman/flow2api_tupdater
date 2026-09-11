@@ -12,7 +12,8 @@ JAR = [{"name": "SID", "value": "root", "domain": ".google.com", "path": "/"},
        {"name": "OSID", "value": "flow", "domain": "flow.google.com", "path": "/"}]
 ACK = {"success": True, "cookies_updated": True, "flow_cookies_configured": True,
        "google_session_cookies_configured": True, "proxy_configured": True,
-       "oauth_verified": True, "account_active": True, "action": "updated"}
+       "auth_mode": "flow", "email": "user@example.com", "flow_identity_verified": True, "native_session_verified": True,
+       "proxy_updated":True, "account_active": True, "action": "updated"}
 PROFILE = {"id": 1, "name": "test", "email": "user@example.com", "google_cookies": json.dumps(JAR),
            "flow2api_url": "http://server", "connection_token_override": "key"}
 
@@ -36,7 +37,7 @@ def client_for(status, data):
     (401, "invalid token", "destination_auth"), (403, "disabled", "destination_auth"),
     (404, "Not Found", "destination_endpoint"), (405, "Method Not Allowed", "destination_endpoint"),
     (307, "redirect", "destination_redirect"), (422, "bad input", "destination_rejected"),
-    (409, "protected profile", "independent_login"), (429, "busy", "destination_unavailable"),
+    (409, "protected profile", "destination_conflict"), (429, "busy", "destination_unavailable"),
     (503, "verification temporary", "destination_unavailable"),
     (400, "Invalid captcha_proxy_url", "destination_proxy"),
     (400, "Invalid session token or account proxy unavailable", "verification_unavailable"),
@@ -44,7 +45,7 @@ def client_for(status, data):
 ])
 async def test_destination_failures_are_classified_without_body_leak(status, detail, code):
     with patch("token_updater.updater.httpx.AsyncClient", return_value=client_for(status, {"detail": detail + " secret-value"})):
-        result = await TokenSyncer()._push_to_flow2api("st", "http://server", "key", google_cookies=JAR)
+        result = await TokenSyncer()._push_to_flow2api("flow:user@example.com", "http://server", "key", google_cookies=JAR, captcha_proxy_url="socks5://host.docker.internal:20001")
     assert result["error_code"] == code
     assert result["status_code"] == status
     assert f"HTTP {status}" in result["error"]
@@ -52,13 +53,13 @@ async def test_destination_failures_are_classified_without_body_leak(status, det
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("changes,code", [({"oauth_verified": False}, "oauth_unconfirmed"),
+@pytest.mark.parametrize("changes,code", [({"flow_identity_verified": False}, "flow_identity_unconfirmed"),
                                         ({"native_session_verified": False}, "native_session_unverified"),
                                         ({"account_active": False}, "account_disabled"),
                                         ({"account_active": None}, "activation_unconfirmed")])
 async def test_saved_or_unverified_is_not_recovered(changes, code):
     with patch("token_updater.updater.httpx.AsyncClient", return_value=client_for(200, {**ACK, **changes})):
-        result = await TokenSyncer()._push_to_flow2api("st", "http://server", "key", google_cookies=JAR)
+        result = await TokenSyncer()._push_to_flow2api("flow:user@example.com", "http://server", "key", google_cookies=JAR, captcha_proxy_url="socks5://host.docker.internal:20001")
     assert not result["success"]
     assert result["error_code"] == code
 

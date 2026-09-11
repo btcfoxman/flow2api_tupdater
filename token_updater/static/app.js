@@ -1432,13 +1432,13 @@ function openCookieModal(profileId) {
                 <div>
                     <span class="eyebrow">会话数据管理</span>
                     <h3 class="modal-title">导入或导出当前登录态</h3>
-                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 导入 Cookie JSON 后，系统会写入持久化浏览器资料并自动刷新 session。也可以直接导出当前账号的 labs.google Cookie 作为备份。</p>
+                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 导入完整 Google/Flow Cookie JSON 后，系统会在源浏览器验证 Flow 新站身份。导出保留域名与有效期，不包含 Labs 会话。</p>
                 </div>
                 <button class="btn ghost icon-only" onclick="closeModal()" title="关闭">${renderIcon("x")}</button>
             </div>
             <div class="field">
                 <label for="cookie-json">会话数据文本</label>
-                <textarea id="cookie-json" placeholder='[{"name":"...","value":"...","domain":".labs.google","path":"/","secure":true}]'></textarea>
+                <textarea id="cookie-json" placeholder='[{"name":"SID","value":"...","domain":".google.com","path":"/"},{"name":"OSID","value":"...","domain":"flow.google.com","path":"/"}]'></textarea>
             </div>
             <div class="modal-actions">
                 <button class="btn outline" onclick="closeModal()">取消</button>
@@ -1458,7 +1458,7 @@ function openProtocolLoginModal(profileId) {
                 <div>
                     <span class="eyebrow">协议 Cookie 管理</span>
                     <h3 class="modal-title">导入或导出 Google Cookies</h3>
-                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 刷新 Labs 授权，再通过源浏览器校验完整 Flow 会话。也可以导出当前账号已保存的 Google Cookies 进行备份或迁移。</p>
+                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 直接验证 flow.google.com 登录身份与完整 Cookie 会话，不再刷新 Labs 授权。也可以导出已保存的 Google/Flow Cookies 进行备份或迁移。</p>
                 </div>
                 <button class="btn ghost icon-only" onclick="closeModal()" title="关闭">${renderIcon("x")}</button>
             </div>

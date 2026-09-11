@@ -32,28 +32,28 @@ class FlowSessionSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("captcha_proxy_url", push.await_args.kwargs)
 
     async def test_transport_sends_full_jar_and_explicit_target_proxy(self):
-        response = SimpleNamespace(status_code=200, json=lambda: {"success":True,"cookies_updated":True,"flow_cookies_configured":True,"google_session_cookies_configured":True,"proxy_updated":True,"proxy_configured":True,"oauth_verified":True,"account_active":True})
+        response = SimpleNamespace(status_code=200, json=lambda: {"success":True,"cookies_updated":True,"flow_cookies_configured":True,"google_session_cookies_configured":True,"proxy_updated":True,"proxy_configured":True,"auth_mode":"flow","email":"user@example.com","flow_identity_verified":True,"native_session_verified":True,"account_active":True})
         client = AsyncMock()
         client.__aenter__.return_value = client
         client.post.return_value = response
         with patch("token_updater.updater.httpx.AsyncClient", return_value=client):
-            result = await TokenSyncer()._push_to_flow2api("session", "http://server", "key", google_cookies=JAR, captcha_proxy_url="socks5://host.docker.internal:20001")
+            result = await TokenSyncer()._push_to_flow2api("flow:user@example.com", "http://server", "key", google_cookies=JAR, captcha_proxy_url="socks5://host.docker.internal:20001")
         self.assertTrue(result["success"])
-        self.assertEqual(client.post.await_args.kwargs["json"], {"session_token":"session", "google_cookies":JAR, "captcha_proxy_url":"socks5://host.docker.internal:20001"})
+        self.assertEqual(client.post.await_args.kwargs["json"], {"auth_mode":"flow", "email":"user@example.com", "google_cookies":JAR, "captcha_proxy_url":"socks5://host.docker.internal:20001"})
 
     async def test_rejects_old_server_that_silently_ignores_cookie_payload(self):
         client = AsyncMock()
         client.__aenter__.return_value = client
         client.post.return_value = SimpleNamespace(status_code=200, json=lambda: {"success":True})
         with patch("token_updater.updater.httpx.AsyncClient", return_value=client):
-            self.assertFalse((await TokenSyncer()._push_to_flow2api("st", "http://server", "key", google_cookies=JAR))["success"])
+            self.assertFalse((await TokenSyncer()._push_to_flow2api("flow:user@example.com", "http://server", "key", google_cookies=JAR))["success"])
 
     async def test_cookie_sync_requires_destination_account_proxy(self):
         client = AsyncMock()
         client.__aenter__.return_value = client
         client.post.return_value = SimpleNamespace(status_code=200, json=lambda: {"success":True, "cookies_updated":True, "flow_cookies_configured":True, "google_session_cookies_configured":True, "proxy_configured":False})
         with patch("token_updater.updater.httpx.AsyncClient", return_value=client):
-            result = await TokenSyncer()._push_to_flow2api("st", "http://server", "key", google_cookies=JAR)
+            result = await TokenSyncer()._push_to_flow2api("flow:user@example.com", "http://server", "key", google_cookies=JAR)
         self.assertFalse(result["success"])
         self.assertIn("代理", result["error"])
 
@@ -71,7 +71,7 @@ class FlowSessionSyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await BrowserManager()._save_google_cookies_from_context(1, context))
         save.assert_not_awaited()
         with patch("token_updater.updater.httpx.AsyncClient") as client:
-            result = await TokenSyncer()._push_to_flow2api("st", "http://server", "key", google_cookies=[JAR[1]])
+            result = await TokenSyncer()._push_to_flow2api("flow:user@example.com", "http://server", "key", google_cookies=[JAR[1]])
         self.assertFalse(result["success"])
         client.assert_not_called()
 

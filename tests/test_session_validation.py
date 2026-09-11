@@ -205,9 +205,9 @@ async def test_flow_landing_page_is_not_an_authenticated_session():
          patch.object(manager, "_wait_for_flow_cookies", AsyncMock()), \
          patch.object(manager, "_save_google_cookies_from_context", AsyncMock()) as save, \
          patch.object(manager, "_persist_login_state", AsyncMock()):
-        assert await manager._complete_flow_session(PROFILE, None, SimpleNamespace(url="https://flow.google.com/about")) is None
+        assert await manager._complete_flow_session(PROFILE, None, SimpleNamespace(url="https://flow.google.com/about", evaluate=AsyncMock(return_value={"origin":"https://flow.google.com","path":"/about","ready":False}))) is None
     save.assert_not_awaited()
-    assert manager.get_session_error(1)["error_code"] == "cookies_incomplete"
+    assert manager.get_session_error(1)["error_code"] == "flow_login_required"
 
 
 @pytest.mark.asyncio
@@ -230,6 +230,9 @@ async def test_flow_navigation_cannot_switch_the_verified_identity():
          patch.object(manager, "_get_session_cookie", AsyncMock(return_value="rotated")), \
          patch.object(manager, "_validate_context_session", AsyncMock(return_value=failure("identity_mismatch", "wrong account"))) as validate, \
          patch.object(manager, "_persist_login_state", AsyncMock()) as persist:
-        assert await manager._complete_flow_session(PROFILE, None, SimpleNamespace(url="https://flow.google.com/")) is None
-    validate.assert_awaited_once_with(None, PROFILE["email"])
+        page = SimpleNamespace(url="https://flow.google.com/", evaluate=AsyncMock(return_value={
+            "origin":"https://flow.google.com","path":"/","ready":True,"email":"wrong@example.com"}))
+        assert await manager._complete_flow_session(PROFILE, None, page) is None
+    validate.assert_not_awaited()
+    assert manager.get_session_error(1)["error_code"] == "identity_mismatch"
     persist.assert_awaited_once_with(1, None)

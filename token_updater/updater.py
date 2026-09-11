@@ -14,7 +14,7 @@ from .events import dashboard_events
 from .execution import execution_gate
 from .gemini_bridge import gemini_cookie_bridge
 from .logger import logger
-from .session_validation import failure, scoped_google_cookies, validate_google_cookies
+from .session_validation import failure, scoped_google_cookies, validate_google_cookies, flow_receipt_email
 from .sync_errors import destination_error
 
 
@@ -393,7 +393,7 @@ class TokenSyncer:
             await self._update_profile_check_result(
                 profile_id,
                 success_result,
-                email=result.get("email", profile.get("email")),
+                email=result.get("email") or profile.get("email"),
                 last_sync_time=datetime.now().isoformat(),
                 last_sync_result=success_result,
                 sync_count=profile.get("sync_count", 0) + 1,
@@ -635,18 +635,26 @@ class TokenSyncer:
 
         url = f"{flow2api_url}/api/plugin/update-token"
         payload = {"session_token": session_token}
+        if str(session_token).startswith("flow:") and google_cookies is None:
+            return failure("cookies_incomplete", "Flow 身份标识不是登录凭据，必须同步完整 Google/Flow Cookie")
         if google_cookies is not None:
             google_cookies = scoped_google_cookies(google_cookies)
             checked = validate_google_cookies(google_cookies)
             if not checked["success"]:
                 return checked
-            payload["google_cookies"] = google_cookies
+            payload = {"auth_mode": "flow", "google_cookies": google_cookies}
+            source_email = flow_receipt_email(session_token)
+            if not source_email:
+                return failure("flow_identity_unconfirmed", "尚未确认源 Flow 新站身份，请升级同步器并通过源浏览器验证")
+            payload["email"] = source_email
+            if not captcha_proxy_url:
+                return failure("destination_proxy", "Flow 新站同步必须配置目标可访问、与源 Profile 同出口的代理 captcha_proxy_url")
         if captcha_proxy_url:
             payload["captcha_proxy_url"] = captcha_proxy_url
 
         try:
-            # Server verifies OAuth on the account proxy before acknowledging the write.
-            async with httpx.AsyncClient(timeout=90) as client:
+            # Server verifies Flow identity in its own browser on the account proxy.
+            async with httpx.AsyncClient(timeout=180) as client:
                 response = await client.post(
                     url,
                     json=payload,
@@ -669,19 +677,21 @@ class TokenSyncer:
                 if captcha_proxy_url and (data.get("proxy_updated") is not True or data.get("proxy_configured") is not True):
                     return {"success": False, "error": "Flow2API did not acknowledge the destination proxy binding"}
                 if google_cookies is not None:
-                    if data.get("oauth_verified") is not True:
-                        return failure("oauth_unconfirmed", "目标未确认 Labs 实际鉴权，请先升级 Flow2API；不能将已接收视为已恢复")
-                    if data.get("native_session_verified") is False:
-                        return {**failure("native_session_unverified", "会话已保存且 OAuth 有效，但目标 Flow 项目登录预检失败；不要以生成任务反复验证登录态"),
-                                "synced": True, "oauth_verified": True, "native_session_verified": False}
+                    if data.get("auth_mode") != "flow" or data.get("flow_identity_verified") is not True:
+                        return failure("flow_identity_unconfirmed", "目标尚未确认 Flow 新站身份，请先升级 Flow2API；不会回退 Labs")
+                    if not isinstance(data.get("email"), str) or data["email"].strip().lower() != source_email:
+                        return failure("identity_mismatch", "目标未确认同一 Flow 账号邮箱，未将本次同步计为成功")
+                    if data.get("native_session_verified") is not True:
+                        return {**failure("native_session_unverified", "目标 Flow 登录预检未通过；不要以生成任务反复验证登录态"),
+                                "synced": True, "native_session_verified": False}
                     if data.get("account_active") is False:
                         return {**failure("account_disabled", "会话已保存并通过鉴权，但目标账号仍禁用；请检查目标手动禁用状态或自动启用设置"),
-                                "synced": True, "account_active": data.get("account_active"), "oauth_verified": True}
+                                "synced": True, "account_active": data.get("account_active"), "auth_mode": "flow"}
                     if data.get("account_active") is not True:
                         return failure("activation_unconfirmed", "目标未确认账号启用状态，请升级目标服务并检查账号状态")
                 message = data.get("message", "")
-                email = None
-                if " for " in message:
+                email = data["email"].strip().lower() if google_cookies is not None else None
+                if google_cookies is None and isinstance(message, str) and " for " in message:
                     email = message.split(" for ")[-1]
 
                 return {
@@ -689,7 +699,8 @@ class TokenSyncer:
                     "action": data.get("action"),
                     "message": message,
                     "email": email,
-                    **({"oauth_verified": True, "account_active": True} if google_cookies is not None else {}),
+                    **({"flow_identity_verified": True, "native_session_verified": True,
+                        "auth_mode": "flow", "account_active": True} if google_cookies is not None else {}),
                 }
         except Exception:
             return failure("destination_unavailable", "同步响应未确认，请检查目标账号状态后再重试；未清除源 Cookie")
