@@ -19,7 +19,8 @@ Flow2API Token Updater 是一个轻量级的多账号令牌刷新工具。
 - 浏览器自动登录：支持自动填写账号密码登录（多语言：中/英/日/韩/西/法/德/葡/俄）
 - 运行时轻量：只有在需要登录时才会启动 VNC / Xvfb / noVNC
 - Cookie 导入/导出：保留完整 Google/Flow Cookie 的域名、路径与有效期；只有 Labs Cookie 不足以恢复新站登录
-- 完整会话：浏览器登录后提取带 domain/path/expiry 的 Google/Flow cookies，同步后由目标持久化浏览器继续轮换
+- 完整会话：浏览器登录后提取带 domain/path/expiry 的 Google/Flow cookies，目标实际验证后才确认同步成功；普通快照不保证目标能够独立持续续期
+- 会话维护：定时检查目标 `needs_refresh` 和新版 `session_status`；真实验证失败会触发源 Profile 同步，不以长期 Cookie 日期或缓存额度判断账号健康。源服务需持续运行，设备绑定会话仍可能要求在原 Profile 完成登录
 - 智能同步：按最终生效的 Flow2API 地址和令牌分组
 - 单账号覆盖：每个 Profile 都可以覆盖目标地址和连接令牌
 - 代理支持：每个 Profile 都可以使用独立代理

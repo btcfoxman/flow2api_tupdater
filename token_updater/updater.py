@@ -112,6 +112,12 @@ class TokenSyncer:
         if token_info.get("needs_refresh"):
             return True, "目标端判定需要刷新"
 
+        if (token_info.get("auth_mode") == "flow"
+                and token_info.get("session_status") in {"refresh_required", "verification_failed"}):
+            # Cookie retention dates and cached credits do not make a rejected
+            # target session healthy, even if an older target omits needs_refresh.
+            return True, "目标新站会话验证失败，需要重新同步源 Profile"
+
         if self._is_sync_overdue(profile, now=now):
             return True, f"距离上次同步已超过 {config.refresh_interval} 分钟"
 

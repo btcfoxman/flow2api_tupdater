@@ -25,6 +25,15 @@ def test_overdue_check_accepts_timezone_aware_imported_timestamps():
         assert not TokenSyncer()._is_sync_overdue({"last_sync_time": now.isoformat()}, now)
 
 
+def test_failed_native_session_is_not_hidden_by_long_cookie_expiry():
+    profile={**PROFILE,"last_sync_time":datetime.now().isoformat()}
+    account={"email":PROFILE["email"],"auth_mode":"flow","is_active":True,
+             "session_status":"refresh_required","flow_cookie_expires_at":"2100-01-01T00:00:00Z"}
+    assert TokenSyncer()._should_sync_profile(profile,{PROFILE["email"]:account})[0]
+    account["sync_allowed"]=False
+    assert not TokenSyncer()._should_sync_profile(profile,{PROFILE["email"]:account})[0]
+
+
 def client_for(status, data):
     client = AsyncMock()
     client.__aenter__.return_value = client
